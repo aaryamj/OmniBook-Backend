@@ -9,6 +9,9 @@ import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 
+import org.hibernate.annotations.Filter;
+import org.hibernate.annotations.FilterDef;
+import org.hibernate.annotations.ParamDef;
 import java.time.LocalDateTime;
 import java.util.Collection;
 import java.util.Collections;
@@ -19,6 +22,8 @@ import java.util.Collections;
 @AllArgsConstructor
 @Entity
 @Table(name = "users")
+@FilterDef(name = "tenantFilter", parameters = @ParamDef(name = "tenantId", type = Long.class))
+@Filter(name = "tenantFilter", condition = "tenant_id = :tenantId")
 public class User implements UserDetails {
 
     @Id
@@ -43,13 +48,53 @@ public class User implements UserDetails {
     private boolean enabled;
 
     private String verificationCode;
+    
+    // Patient Profile Fields
+    private java.time.LocalDate dateOfBirth;
+    private String bloodGroup;
+    private String allergies;
+    private String weight;
+    private String heartRate;
 
     @Enumerated(EnumType.STRING)
     private AuthProvider authProvider = AuthProvider.LOCAL;
 
     private String providerId;
 
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "tenant_id")
+    private Tenant tenant;
+
+    private LocalDateTime updatedAt;
+
+    // Provider specific fields
+    @Builder.Default
+    private Boolean isScheduleDelegated = true;
+    private String specialization;
+    private String licenseNumber;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "tenant_role_id")
+    private TenantRole tenantRole;
+
     private LocalDateTime createdAt;
+    
+    private LocalDateTime lastLoginAt;
+    
+    private String lastLoginLocation;
+    
+    @Column(columnDefinition="LONGTEXT")
+    private String profilePicture;
+    
+    // Social Logins
+    private boolean isGoogleConnected;
+    private String googleEmail;
+    private boolean isFacebookConnected;
+    private String facebookEmail;
+    
+    private String twoFactorCode;
+    
+    private LocalDateTime twoFactorExpiry;
     
     @PrePersist
     protected void onCreate() {

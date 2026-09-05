@@ -16,5 +16,12 @@ public class AuthResponse {
     private boolean success;
     private String role;
     private String fullName;
+    private String subscriptionTier;
+    private String specialization;
     
+    // 2FA support
+    private boolean requires2fa;
+    private String email;
+    private String phone;
+    private String organizationName;
 }

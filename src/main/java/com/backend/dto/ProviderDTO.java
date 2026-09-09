@@ -21,4 +21,8 @@ public class ProviderDTO {
     private String profilePictureUrl;
     private String licenseImageUrl;
     private String credentials;
+    private Double thisWeekTotal;
+    private Double thisWeekStripe;
+    private Double thisWeekEsewa;
+    private Double totalEarnings;
 }

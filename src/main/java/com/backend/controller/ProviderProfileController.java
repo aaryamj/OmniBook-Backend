@@ -19,13 +19,13 @@ public class ProviderProfileController {
     private final ProviderProfileService providerProfileService;
 
     @GetMapping
-    @PreAuthorize("hasRole('SERVICE_PROVIDER')")
+    @PreAuthorize("hasAnyRole('SERVICE_PROVIDER', 'PROVIDER')")
     public ResponseEntity<ProviderProfileDTO> getProfile(Principal principal) {
         return ResponseEntity.ok(providerProfileService.getProfile(principal.getName()));
     }
 
     @PutMapping
-    @PreAuthorize("hasRole('SERVICE_PROVIDER')")
+    @PreAuthorize("hasAnyRole('SERVICE_PROVIDER', 'PROVIDER')")
     public ResponseEntity<ProviderProfileDTO> updateProfile(
             Principal principal,
             @RequestBody ProviderProfileDTO request) {
@@ -33,7 +33,7 @@ public class ProviderProfileController {
     }
 
     @PostMapping("/picture")
-    @PreAuthorize("hasRole('SERVICE_PROVIDER')")
+    @PreAuthorize("hasAnyRole('SERVICE_PROVIDER', 'PROVIDER')")
     public ResponseEntity<ProviderProfileDTO> uploadProfilePicture(
             Principal principal,
             @RequestParam("file") MultipartFile file) {

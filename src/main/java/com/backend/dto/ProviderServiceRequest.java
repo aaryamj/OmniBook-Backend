@@ -15,5 +15,6 @@ public class ProviderServiceRequest {
         private Boolean isTelemedicine;
         private String category;
         private Boolean isActive;
+        private Integer maxCapacity;
     }
 }

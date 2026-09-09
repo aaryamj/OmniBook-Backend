@@ -2,15 +2,19 @@ package com.backend.controller;
 
 import com.backend.model.Appointment;
 import com.backend.model.ProviderProfile;
+import com.backend.model.ProviderService;
 import com.backend.model.Tenant;
+import com.backend.model.User;
 import com.backend.repository.AppointmentRepository;
 import com.backend.repository.ProviderProfileRepository;
 import com.backend.repository.ProviderServiceRepository;
 import com.backend.repository.TenantRepository;
+import com.backend.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,6 +30,7 @@ public class PublicBookingController {
     private final ProviderServiceRepository providerServiceRepository;
     private final ProviderProfileRepository providerProfileRepository;
     private final AppointmentRepository appointmentRepository;
+    private final UserRepository userRepository;
     private final com.backend.service.PublicBookingService publicBookingService;
 
     @GetMapping("/locations")
@@ -58,7 +63,9 @@ public class PublicBookingController {
                 Map<String, Object> map = new HashMap<>();
                 map.put("id", t.getId());
                 map.put("organizationName", t.getOrganizationName());
+                map.put("organizationType", t.getOrganizationType() != null ? t.getOrganizationType() : "Clinic");
                 map.put("address", t.getAddress());
+                map.put("logoUrl", t.getLogoUrl());
                 return map;
             }).collect(Collectors.toList());
 
@@ -122,23 +129,94 @@ public class PublicBookingController {
         }
     }
 
+    @GetMapping("/providers/{providerId}/services")
+    public ResponseEntity<?> getServicesByProvider(@PathVariable Long providerId) {
+        try {
+            User provider = userRepository.findById(providerId).orElse(null);
+            if (provider == null) {
+                return ResponseEntity.badRequest().body(Map.of("success", false, "message", "Provider not found"));
+            }
+            ProviderProfile profile = providerProfileRepository.findByUser(provider).orElse(null);
+            List<ProviderService> services = profile != null ? providerServiceRepository.findByProviderProfile(profile) : Collections.emptyList();
+
+            List<Map<String, Object>> response = services.stream()
+                    .filter(s -> Boolean.TRUE.equals(s.getIsActive()))
+                    .map(s -> {
+                        Map<String, Object> map = new HashMap<>();
+                        map.put("id", s.getId());
+                        map.put("serviceName", s.getServiceName());
+                        map.put("durationMinutes", s.getDurationMinutes() != null ? s.getDurationMinutes() : 30);
+                        map.put("fee", s.getFee() != null ? s.getFee() : 0.0);
+                        map.put("category", s.getCategory());
+                        map.put("isTelemedicine", Boolean.TRUE.equals(s.getIsTelemedicine()));
+                        return map;
+                    }).collect(Collectors.toList());
+
+            // If provider has no custom services configured yet, fallback to their primary specialty or general session
+            if (response.isEmpty()) {
+                String fallbackName = (profile != null && profile.getPrimarySpecialty() != null && !profile.getPrimarySpecialty().trim().isEmpty())
+                        ? profile.getPrimarySpecialty()
+                        : "General Consultation & Session";
+                Map<String, Object> defaultMap = new HashMap<>();
+                defaultMap.put("id", 0L);
+                defaultMap.put("serviceName", fallbackName);
+                defaultMap.put("durationMinutes", 30);
+                defaultMap.put("fee", 0.0);
+                defaultMap.put("category", "General");
+                defaultMap.put("isTelemedicine", false);
+                response.add(defaultMap);
+            }
+
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "services", response
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "Failed to fetch provider services: " + e.getMessage()
+            ));
+        }
+    }
+
     @GetMapping("/providers/{providerId}/slots")
     public ResponseEntity<?> getProviderSlots(
             @PathVariable Long providerId,
             @RequestParam String date,
-            @RequestParam(required = false) String serviceName) {
+            @RequestParam(required = false) String serviceName,
+            @RequestParam(required = false) String userEmail,
+            @RequestParam(required = false) Long userId) {
         try {
-            Map<String, Object> result = publicBookingService.getProviderSlots(providerId, date, serviceName);
+            Map<String, Object> result = publicBookingService.getProviderSlots(providerId, date, serviceName, userEmail, userId);
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("slots", result.get("slots"));
             response.put("isClosed", result.get("isClosed"));
             response.put("closedMessage", result.get("closedMessage"));
+            response.put("activeAppointmentsCount", result.get("activeAppointmentsCount"));
+            response.put("maxAllowedAppointments", result.get("maxAllowedAppointments"));
+            response.put("remainingCapacity", result.get("remainingCapacity"));
+            response.put("isLimitReached", result.get("isLimitReached"));
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of(
                     "success", false,
                     "message", "Failed to fetch slots: " + e.getMessage()
+            ));
+        }
+    }
+
+    @GetMapping("/user-limit")
+    public ResponseEntity<?> getUserAppointmentLimit(
+            @RequestParam(required = false) String userEmail,
+            @RequestParam(required = false) Long userId) {
+        try {
+            Map<String, Object> result = publicBookingService.getUserAppointmentLimit(userId, userEmail);
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "Failed to get appointment limit: " + e.getMessage()
             ));
         }
     }

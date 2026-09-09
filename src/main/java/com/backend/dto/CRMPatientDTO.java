@@ -16,6 +16,7 @@ public class CRMPatientDTO {
     private String bgColor;
     private String textColor;
     private String name;
+    private String profilePicture;
     private String phone;
     private String phoneType;
     private String lastVisit;
@@ -34,6 +35,22 @@ public class CRMPatientDTO {
     private String lifetimeBilledUSD;
     private String lifetimeBilledNPR;
     private String outstandingBalance;
+    private List<CRMAppointmentItemDTO> timeline;
+
+    @Data
+    @Builder
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class CRMAppointmentItemDTO {
+        private Long id;
+        private String serviceName;
+        private String appointmentDate;
+        private String appointmentTime;
+        private String appointmentStatus;
+        private String providerName;
+        private String notes;
+        private Double price;
+    }
 
     @Data
     @Builder

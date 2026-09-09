@@ -37,6 +37,13 @@ public class UserSessionService {
         userSessionRepository.save(session);
     }
 
+    @org.springframework.transaction.annotation.Transactional
+    public void invalidateSession(String token) {
+        if (token != null && !token.isBlank()) {
+            userSessionRepository.deleteByToken(token);
+        }
+    }
+
     private String getClientIp(HttpServletRequest request) {
         String[] headers = {
             "X-Forwarded-For",

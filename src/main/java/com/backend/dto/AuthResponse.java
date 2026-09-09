@@ -24,4 +24,19 @@ public class AuthResponse {
     private String email;
     private String phone;
     private String organizationName;
+    private String organizationType;
+    private String primaryAccentColor;
+    private String profilePicture;
+
+    // Custom Tenant Role & Feature Permissions
+    private String tenantRoleName;
+    private String accessScope;
+    private String privilegeLevel;
+    private String permissionsJson;
+
+    // Additional Identity Attributes
+    private Long id;
+    private Long tenantId;
+    private String organizationLogo;
+    private boolean twoStepEnabled;
 }

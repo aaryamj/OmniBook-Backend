@@ -13,8 +13,10 @@ import org.hibernate.annotations.Filter;
 import org.hibernate.annotations.FilterDef;
 import org.hibernate.annotations.ParamDef;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
 
 @Data
 @Builder
@@ -95,6 +97,10 @@ public class User implements UserDetails {
     private String twoFactorCode;
     
     private LocalDateTime twoFactorExpiry;
+
+    private String resetPasswordToken;
+
+    private LocalDateTime resetPasswordExpiry;
     
     @PrePersist
     protected void onCreate() {
@@ -103,7 +109,15 @@ public class User implements UserDetails {
 
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
-        return Collections.singletonList(new SimpleGrantedAuthority("ROLE_" + role.toUpperCase()));
+        String r = role != null ? role.toUpperCase() : "USER";
+        List<GrantedAuthority> authorities = new ArrayList<>();
+        authorities.add(new SimpleGrantedAuthority("ROLE_" + r));
+        if ("PROVIDER".equals(r)) {
+            authorities.add(new SimpleGrantedAuthority("ROLE_SERVICE_PROVIDER"));
+        } else if ("SERVICE_PROVIDER".equals(r)) {
+            authorities.add(new SimpleGrantedAuthority("ROLE_PROVIDER"));
+        }
+        return authorities;
     }
 
     @Override

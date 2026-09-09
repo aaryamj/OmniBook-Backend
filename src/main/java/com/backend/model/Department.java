@@ -22,6 +22,10 @@ public class Department {
     @Column(nullable = false)
     private String name;
 
+    private String code;
+
+    private String headName;
+
     @Column(columnDefinition = "TEXT")
     private String description;
 

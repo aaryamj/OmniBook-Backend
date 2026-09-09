@@ -39,7 +39,60 @@ public class TenantController {
                 return ResponseEntity.badRequest().body("User does not belong to a tenant");
             }
 
-            return ResponseEntity.ok(user.getTenant());
+            Tenant tenant = user.getTenant();
+            Map<String, Object> response = new HashMap<>();
+            response.put("id", tenant.getId());
+            response.put("organizationName", tenant.getOrganizationName());
+            response.put("organizationType", tenant.getOrganizationType());
+            response.put("registrationNumber", tenant.getRegistrationNumber());
+            response.put("status", tenant.getStatus());
+            response.put("address", tenant.getAddress());
+            response.put("logoUrl", tenant.getLogoUrl());
+            response.put("primaryAccentColor", tenant.getPrimaryAccentColor());
+            response.put("phoneContact", tenant.getPhoneContact());
+            response.put("timezone", tenant.getTimezone());
+            response.put("openingTime", tenant.getOpeningTime());
+            response.put("closingTime", tenant.getClosingTime());
+            response.put("slotDuration", tenant.getSlotDuration());
+            response.put("subscriptionTier", tenant.getSubscriptionTier());
+            response.put("twoFactorEnabled", tenant.getTwoFactorEnabled());
+            response.put("sessionTimeout", tenant.getSessionTimeout());
+            response.put("requireHipaa", tenant.getRequireHipaa());
+            response.put("createdAt", tenant.getCreatedAt());
+
+            // Add official admin details for this tenant
+            java.util.List<User> admins = userRepository.findByTenantIdAndRole(tenant.getId(), "admin");
+            if (!admins.isEmpty()) {
+                User adminUser = admins.get(0);
+                response.put("adminName", adminUser.getFullName());
+                response.put("adminEmail", adminUser.getEmail());
+                response.put("adminPhone", adminUser.getPhone());
+                response.put("adminProfilePicture", adminUser.getProfilePicture());
+            } else if ("admin".equalsIgnoreCase(user.getRole())) {
+                response.put("adminName", user.getFullName());
+                response.put("adminEmail", user.getEmail());
+                response.put("adminPhone", user.getPhone());
+                response.put("adminProfilePicture", user.getProfilePicture());
+            }
+
+            if (user.getTenantRole() != null) {
+                response.put("tenantRoleId", user.getTenantRole().getId());
+                response.put("tenantRoleName", user.getTenantRole().getRoleName());
+                response.put("accessScope", user.getTenantRole().getAccessScope());
+                response.put("privilegeLevel", user.getTenantRole().getPrivilegeLevel());
+                response.put("permissionsJson", user.getTenantRole().getPermissionsJson());
+            } else {
+                response.put("tenantRoleId", null);
+                response.put("tenantRoleName", null);
+                response.put("accessScope", null);
+                response.put("privilegeLevel", null);
+                response.put("permissionsJson", null);
+            }
+            response.put("currentUserId", user.getId());
+            response.put("currentUserRole", user.getRole());
+            response.put("currentUserFullName", user.getFullName());
+
+            return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, Object> response = new HashMap<>();
             response.put("success", false);
@@ -92,10 +145,16 @@ public class TenantController {
                     sessionTimeout
             );
 
+            if (logoUrl != null) {
+                admin.setProfilePicture(logoUrl);
+                userRepository.save(admin);
+            }
+
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("message", "Profile updated successfully");
             response.put("tenant", updatedTenant);
+            response.put("profilePicture", logoUrl != null ? logoUrl : updatedTenant.getLogoUrl());
 
             auditLogService.logAction(admin, "Updated Tenant Settings/Profile", "127.0.0.1");
 
@@ -104,6 +163,40 @@ public class TenantController {
             Map<String, Object> response = new HashMap<>();
             response.put("success", false);
             response.put("message", "Error updating profile: " + e.getMessage());
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
+
+    @PutMapping("/branding")
+    public ResponseEntity<?> updateBranding(@RequestBody Map<String, String> request) {
+        try {
+            UserDetails userDetails = (UserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+            User admin = userRepository.findByEmail(userDetails.getUsername())
+                    .orElseThrow(() -> new RuntimeException("User not found"));
+
+            if (admin.getTenant() == null) {
+                return ResponseEntity.badRequest().body("User does not belong to a tenant");
+            }
+
+            String primaryAccentColor = request.get("primaryAccentColor");
+            Tenant updatedTenant = tenantService.updateTenantProfile(
+                    admin.getTenant().getId(),
+                    primaryAccentColor,
+                    null, null, null, null, null, null, null, null
+            );
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Branding updated successfully");
+            response.put("primaryAccentColor", updatedTenant.getPrimaryAccentColor());
+
+            auditLogService.logAction(admin, "Updated Institutional Branding color to " + primaryAccentColor, "127.0.0.1");
+
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", false);
+            response.put("message", "Error updating branding: " + e.getMessage());
             return ResponseEntity.badRequest().body(response);
         }
     }

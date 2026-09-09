@@ -23,6 +23,9 @@ public class Tenant {
     @Column(nullable = false)
     private String organizationName;
 
+    @Column(name = "organization_type")
+    private String organizationType;
+
     @Column(nullable = false, unique = true)
     private String registrationNumber;
 

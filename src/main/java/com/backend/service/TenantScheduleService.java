@@ -2,14 +2,17 @@ package com.backend.service;
 
 import com.backend.dto.TenantScheduleDTO;
 import com.backend.dto.TenantScheduleSettingsDTO;
+import com.backend.model.ProviderSchedule;
 import com.backend.model.Tenant;
 import com.backend.model.TenantSchedule;
 import com.backend.model.User;
+import com.backend.repository.ProviderScheduleRepository;
 import com.backend.repository.TenantRepository;
 import com.backend.repository.TenantScheduleRepository;
 import com.backend.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -18,11 +21,13 @@ import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
+@Transactional
 public class TenantScheduleService {
 
     private final TenantScheduleRepository scheduleRepository;
     private final TenantRepository tenantRepository;
     private final UserRepository userRepository;
+    private final ProviderScheduleRepository providerScheduleRepository;
 
     private User getAdminUser(String adminEmail) {
         User admin = userRepository.findByEmail(adminEmail)
@@ -86,37 +91,86 @@ public class TenantScheduleService {
         Tenant tenant = admin.getTenant();
 
         // Update global settings
-        tenant.setTimezone(request.getTimezone());
-        tenant.setSlotDuration(request.getSlotDuration());
+        if (request.getTimezone() != null) {
+            tenant.setTimezone(request.getTimezone());
+        }
+        if (request.getSlotDuration() != null) {
+            tenant.setSlotDuration(request.getSlotDuration());
+        }
         tenantRepository.save(tenant);
 
         // Update daily schedules
-        for (TenantScheduleDTO dto : request.getSchedules()) {
-            if (dto.getId() != null) {
-                TenantSchedule schedule = scheduleRepository.findById(dto.getId()).orElse(null);
-                if (schedule != null && schedule.getTenant().getId().equals(tenant.getId())) {
-                    schedule.setIsActive(dto.getIsActive());
-                    schedule.setOpeningTime(dto.getOpeningTime());
-                    schedule.setClosingTime(dto.getClosingTime());
-                    
+        if (request.getSchedules() != null) {
+            for (TenantScheduleDTO dto : request.getSchedules()) {
+                TenantSchedule schedule = null;
+                if (dto.getId() != null) {
+                    schedule = scheduleRepository.findById(dto.getId()).orElse(null);
+                }
+                if (schedule == null && dto.getDayOfWeek() != null) {
+                    schedule = scheduleRepository.findByTenantIdAndDayOfWeek(tenant.getId(), dto.getDayOfWeek()).orElse(null);
+                }
+                if (schedule == null && dto.getDayOfWeek() != null) {
+                    schedule = TenantSchedule.builder()
+                            .tenant(tenant)
+                            .dayOfWeek(dto.getDayOfWeek())
+                            .build();
+                }
+
+                if (schedule != null) {
+                    boolean active = Boolean.TRUE.equals(dto.getIsActive());
+                    schedule.setIsActive(active);
+                    if (dto.getOpeningTime() != null) schedule.setOpeningTime(dto.getOpeningTime());
+                    if (dto.getClosingTime() != null) schedule.setClosingTime(dto.getClosingTime());
+
                     // Validate break time bounds
-                    if (dto.getBreakStartTime() != null && dto.getBreakEndTime() != null && dto.getOpeningTime() != null && dto.getClosingTime() != null) {
-                        if (dto.getBreakStartTime().isBefore(dto.getOpeningTime()) || dto.getBreakEndTime().isAfter(dto.getClosingTime())) {
-                            throw new IllegalArgumentException("Break time must be within opening and closing hours on " + schedule.getDayOfWeek());
+                    if (active && dto.getBreakStartTime() != null && dto.getBreakEndTime() != null) {
+                        if (dto.getOpeningTime() != null && dto.getClosingTime() != null) {
+                            if (dto.getBreakStartTime().isBefore(dto.getOpeningTime()) || dto.getBreakEndTime().isAfter(dto.getClosingTime())) {
+                                throw new IllegalArgumentException("Break time must be within opening and closing hours on " + schedule.getDayOfWeek());
+                            }
                         }
                     }
-                    
-                    schedule.setBreakStartTime(dto.getBreakStartTime());
-                    schedule.setBreakEndTime(dto.getBreakEndTime());
-                    
+
+                    if (dto.getBreakStartTime() != null) schedule.setBreakStartTime(dto.getBreakStartTime());
+                    if (dto.getBreakEndTime() != null) schedule.setBreakEndTime(dto.getBreakEndTime());
+
                     // Clear closed message if active
-                    if (dto.getIsActive()) {
+                    if (active) {
                         schedule.setClosedMessage(null);
                     } else {
-                        schedule.setClosedMessage(dto.getClosedMessage());
+                        schedule.setClosedMessage(dto.getClosedMessage() != null ? dto.getClosedMessage() : "Closed");
                     }
-                    
+
                     scheduleRepository.save(schedule);
+                }
+            }
+        }
+
+        // Delegation Rule: Automatically update schedules of service providers who have delegated their schedule
+        List<User> tenantUsers = userRepository.findByTenantId(tenant.getId());
+        List<User> delegatedProviders = tenantUsers.stream()
+                .filter(u -> u.getRole() != null && u.getRole().toLowerCase().contains("provider"))
+                .filter(u -> u.getIsScheduleDelegated() == null || Boolean.TRUE.equals(u.getIsScheduleDelegated()))
+                .collect(Collectors.toList());
+
+        if (!delegatedProviders.isEmpty()) {
+            List<TenantSchedule> updatedTenantSchedules = scheduleRepository.findByTenantId(tenant.getId());
+            for (User provider : delegatedProviders) {
+                for (TenantSchedule ts : updatedTenantSchedules) {
+                    ProviderSchedule ps = providerScheduleRepository.findByProviderAndDayOfWeek(provider, ts.getDayOfWeek())
+                            .orElseGet(() -> ProviderSchedule.builder()
+                                    .provider(provider)
+                                    .dayOfWeek(ts.getDayOfWeek())
+                                    .build());
+
+                    ps.setIsActive(ts.getIsActive());
+                    ps.setOpeningTime(ts.getOpeningTime());
+                    ps.setClosingTime(ts.getClosingTime());
+                    ps.setBreakStartTime(ts.getBreakStartTime());
+                    ps.setBreakEndTime(ts.getBreakEndTime());
+                    ps.setClosedMessage(ts.getClosedMessage());
+
+                    providerScheduleRepository.save(ps);
                 }
             }
         }

@@ -23,4 +23,10 @@ public class AISlotDTO {
     private Long tenantId;
     private Long providerId;
     private String serviceName;
+    private String organizationType;
+    private String organizationName;
+    private String providerTitle;
+    private Integer maxCapacity;
+    private Integer availableSeats;
+    private Boolean isFull;
 }

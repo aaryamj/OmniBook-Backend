@@ -16,4 +16,5 @@ public class PaymentRequestDTO {
     private Double totalAmount;
     private String paymentMethod; // e.g. ESEWA
     private String appointmentType; // e.g. IN_PERSON, VIRTUAL
+    private Long userId;
 }

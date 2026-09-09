@@ -44,5 +44,11 @@ public class DataSeeder implements CommandLineRunner {
             System.out.println("Password: Admin@1234");
             System.out.println("=======================================================");
         }
+
+        userRepository.findByEmail("aakashsah620@gmail.com").ifPresent(u -> {
+            u.setPassword(passwordEncoder.encode("Provider@1234"));
+            userRepository.save(u);
+            System.out.println("✅ Test provider password set for aakashsah620@gmail.com -> Provider@1234");
+        });
     }
 }

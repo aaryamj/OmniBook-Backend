@@ -94,9 +94,9 @@ public class GeminiClientService {
         }
 
         StringBuilder promptBuilder = new StringBuilder();
-        promptBuilder.append("You are an intelligent medical memory summarizer. ");
-        promptBuilder.append("Summarize the following prior patient conversation turns concisely. ");
-        promptBuilder.append("Retain key patient medical symptoms, requested treatments, preferred clinic names, doctors, and preferred appointment timing.\n\n");
+        promptBuilder.append("You are an intelligent appointment memory summarizer. ");
+        promptBuilder.append("Summarize the following prior user conversation turns concisely. ");
+        promptBuilder.append("Retain key details: requested services, organization/clinic/salon/college names, preferred staff/providers, agreed dates, times, booking references, or cancellation requests.\n\n");
 
         if (previousSummary != null && !previousSummary.trim().isEmpty()) {
             promptBuilder.append("Existing Archived Summary:\n").append(previousSummary).append("\n\n");

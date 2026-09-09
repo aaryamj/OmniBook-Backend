@@ -22,4 +22,7 @@ public class ProviderService {
     private Boolean isTelemedicine;
     private String category;
     private Boolean isActive = true;
+
+    @Column(name = "max_capacity", nullable = false, columnDefinition = "int default 1")
+    private Integer maxCapacity = 1;
 }

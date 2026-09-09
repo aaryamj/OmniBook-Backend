@@ -10,4 +10,5 @@ public class AcceptInviteRequest {
     private String phone;
     private String organizationName;
     private String email;
+    private String profilePicture;
 }

@@ -19,6 +19,7 @@ import java.util.Arrays;
 
 @Configuration
 @EnableWebSecurity
+@EnableMethodSecurity
 @RequiredArgsConstructor
 public class SecurityConfig {
 
@@ -32,8 +33,9 @@ public class SecurityConfig {
             .cors(cors -> cors.configurationSource(corsConfigurationSource()))
             .csrf(AbstractHttpConfigurer::disable)
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/auth/**", "/error", "/uploads/**", "/api/v1/public/**").permitAll()
+                .requestMatchers("/api/auth/**", "/api/v1/auth/**", "/error", "/uploads/**", "/api/v1/public/**", "/api/v1/subscriptions/**").permitAll()
                 .requestMatchers(org.springframework.http.HttpMethod.OPTIONS, "/**").permitAll()
+                .requestMatchers("/api/v1/superadmin/**").hasRole("SUPER_ADMIN")
                 .anyRequest().authenticated()
             )
             .sessionManagement(session -> session

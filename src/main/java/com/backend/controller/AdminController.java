@@ -14,6 +14,7 @@ import java.security.Principal;
 public class AdminController {
 
     private final AdminService adminService;
+    private final PublicBookingController publicBookingController;
 
     @GetMapping("/dashboard")
     @PreAuthorize("hasRole('ADMIN')")
@@ -37,13 +38,19 @@ public class AdminController {
     }
 
     @GetMapping("/providers")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("hasAnyRole('ADMIN', 'SERVICE_PROVIDER', 'PROVIDER')")
     public ResponseEntity<?> getAllProviders(Principal principal) {
         try {
             return ResponseEntity.ok(adminService.getAllProviders(principal.getName()));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body("{\"success\":false, \"message\":\"" + e.getMessage() + "\"}");
         }
+    }
+
+    @GetMapping("/providers/{id}/services")
+    @PreAuthorize("hasAnyRole('ADMIN', 'SERVICE_PROVIDER', 'PROVIDER')")
+    public ResponseEntity<?> getProviderServices(@PathVariable Long id) {
+        return publicBookingController.getServicesByProvider(id);
     }
 
     @PutMapping("/providers/{id}/approve")
@@ -121,6 +128,16 @@ public class AdminController {
             return ResponseEntity.badRequest().body(java.util.Map.of("success", false, "message", e.getMessage()));
         }
     }
+
+    @GetMapping("/appointments/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> getAppointmentDetails(@PathVariable Long id, Principal principal) {
+        try {
+            return ResponseEntity.ok(adminService.getAppointmentDetailsById(id, principal.getName()));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("success", false, "message", e.getMessage()));
+        }
+    }
     
     @GetMapping("/patients")
     @PreAuthorize("hasRole('ADMIN')")
@@ -144,7 +161,7 @@ public class AdminController {
     }
 
     @PostMapping("/appointments")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("hasAnyRole('ADMIN', 'SERVICE_PROVIDER', 'PROVIDER')")
     public ResponseEntity<?> createWalkInAppointment(@RequestBody com.backend.dto.WalkInAppointmentRequest request, Principal principal) {
         try {
             adminService.createWalkInAppointment(request, principal.getName());
@@ -170,6 +187,16 @@ public class AdminController {
         try {
             adminService.runDailySettlement(principal.getName());
             return ResponseEntity.ok(java.util.Map.of("success", true, "message", "Daily settlement executed successfully"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/search")
+    @PreAuthorize("hasAnyRole('ADMIN', 'SERVICE_PROVIDER', 'PROVIDER')")
+    public ResponseEntity<?> globalSearch(@RequestParam(name = "q", defaultValue = "") String query, Principal principal) {
+        try {
+            return ResponseEntity.ok(adminService.globalSearch(principal.getName(), query));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(java.util.Map.of("success", false, "message", e.getMessage()));
         }

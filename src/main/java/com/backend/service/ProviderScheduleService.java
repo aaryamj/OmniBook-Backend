@@ -7,6 +7,7 @@ import com.backend.model.Tenant;
 import com.backend.model.TenantSchedule;
 import com.backend.model.User;
 import com.backend.repository.ProviderScheduleRepository;
+import com.backend.repository.TenantRepository;
 import com.backend.repository.TenantScheduleRepository;
 import com.backend.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -15,6 +16,7 @@ import org.springframework.stereotype.Service;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -24,6 +26,7 @@ public class ProviderScheduleService {
 
     private final ProviderScheduleRepository providerScheduleRepository;
     private final TenantScheduleRepository tenantScheduleRepository;
+    private final TenantRepository tenantRepository;
     private final UserRepository userRepository;
 
     private User getAdminUser(String adminEmail) {
@@ -92,7 +95,7 @@ public class ProviderScheduleService {
     }
 
     private List<ProviderSchedule> initializeDefaultSchedules(User provider, Tenant tenant) {
-        List<TenantSchedule> tenantSchedules = tenantScheduleRepository.findByTenantId(tenant.getId());
+        List<TenantSchedule> tenantSchedules = tenant != null ? tenantScheduleRepository.findByTenantId(tenant.getId()) : Collections.emptyList();
         List<ProviderSchedule> defaultSchedules = new ArrayList<>();
         
         if (!tenantSchedules.isEmpty()) {
@@ -116,8 +119,8 @@ public class ProviderScheduleService {
                         .provider(provider)
                         .dayOfWeek(day)
                         .isActive(!"Saturday".equals(day) && !"Sunday".equals(day))
-                        .openingTime(tenant.getOpeningTime() != null ? tenant.getOpeningTime() : LocalTime.of(9, 0))
-                        .closingTime(tenant.getClosingTime() != null ? tenant.getClosingTime() : LocalTime.of(17, 0))
+                        .openingTime(tenant != null && tenant.getOpeningTime() != null ? tenant.getOpeningTime() : LocalTime.of(9, 0))
+                        .closingTime(tenant != null && tenant.getClosingTime() != null ? tenant.getClosingTime() : LocalTime.of(17, 0))
                         .breakStartTime(LocalTime.of(13, 0))
                         .breakEndTime(LocalTime.of(14, 0))
                         .closedMessage(!"Saturday".equals(day) && !"Sunday".equals(day) ? null : "Closed for the weekend")
@@ -140,36 +143,48 @@ public class ProviderScheduleService {
 
         List<TenantSchedule> tenantSchedules = tenantScheduleRepository.findByTenantId(tenant.getId());
 
-        for (ProviderScheduleDTO dto : request.getSchedules()) {
-            if (dto.getId() != null) {
-                ProviderSchedule schedule = providerScheduleRepository.findById(dto.getId()).orElse(null);
-                if (schedule != null && schedule.getProvider().getId().equals(provider.getId())) {
-                    // Prevent enabling if tenant is not active on this day
-                    boolean isTenantActive = tenantSchedules.stream()
-                            .filter(ts -> ts.getDayOfWeek().equals(schedule.getDayOfWeek()))
-                            .findFirst()
-                            .map(TenantSchedule::getIsActive)
-                            .orElse(true);
-                            
-                    schedule.setIsActive(isTenantActive && dto.getIsActive() != null ? dto.getIsActive() : false);
-                    schedule.setOpeningTime(dto.getOpeningTime());
-                    schedule.setClosingTime(dto.getClosingTime());
+        if (request.getSchedules() != null) {
+            for (ProviderScheduleDTO dto : request.getSchedules()) {
+                ProviderSchedule schedule = null;
+                if (dto.getId() != null) {
+                    schedule = providerScheduleRepository.findById(dto.getId()).orElse(null);
+                }
+                if (schedule == null && dto.getDayOfWeek() != null) {
+                    schedule = providerScheduleRepository.findByProviderAndDayOfWeek(provider, dto.getDayOfWeek()).orElse(null);
+                }
+                if (schedule == null && dto.getDayOfWeek() != null) {
+                    schedule = ProviderSchedule.builder()
+                            .provider(provider)
+                            .dayOfWeek(dto.getDayOfWeek())
+                            .build();
+                }
 
-                    // Validate break time bounds
-                    if (dto.getBreakStartTime() != null && dto.getBreakEndTime() != null && dto.getOpeningTime() != null && dto.getClosingTime() != null) {
-                        if (dto.getBreakStartTime().isBefore(dto.getOpeningTime()) || dto.getBreakEndTime().isAfter(dto.getClosingTime())) {
-                            throw new IllegalArgumentException("Break time must be within opening and closing hours on " + schedule.getDayOfWeek());
+                if (schedule != null) {
+                    boolean active = Boolean.TRUE.equals(dto.getIsActive());
+                    schedule.setIsActive(active);
+                    if (dto.getOpeningTime() != null) schedule.setOpeningTime(dto.getOpeningTime());
+                    if (dto.getClosingTime() != null) schedule.setClosingTime(dto.getClosingTime());
+
+                    // Validate break time bounds only if active
+                    if (active && dto.getBreakStartTime() != null && dto.getBreakEndTime() != null) {
+                        if (!dto.getBreakStartTime().isBefore(dto.getBreakEndTime())) {
+                            throw new IllegalArgumentException("Break start time must be before break end time on " + schedule.getDayOfWeek());
+                        }
+                        if (schedule.getOpeningTime() != null && schedule.getClosingTime() != null) {
+                            if (dto.getBreakStartTime().isBefore(schedule.getOpeningTime()) || dto.getBreakEndTime().isAfter(schedule.getClosingTime())) {
+                                throw new IllegalArgumentException("Break time must be within opening and closing hours on " + schedule.getDayOfWeek());
+                            }
                         }
                     }
 
-                    schedule.setBreakStartTime(dto.getBreakStartTime());
-                    schedule.setBreakEndTime(dto.getBreakEndTime());
+                    if (dto.getBreakStartTime() != null) schedule.setBreakStartTime(dto.getBreakStartTime());
+                    if (dto.getBreakEndTime() != null) schedule.setBreakEndTime(dto.getBreakEndTime());
                     
                     // Clear closed message if active
                     if (schedule.getIsActive()) {
                         schedule.setClosedMessage(null);
                     } else {
-                        schedule.setClosedMessage(dto.getClosedMessage());
+                        schedule.setClosedMessage(dto.getClosedMessage() != null ? dto.getClosedMessage() : "Closed");
                     }
                     
                     providerScheduleRepository.save(schedule);
@@ -184,7 +199,7 @@ public class ProviderScheduleService {
         User provider = userRepository.findByEmail(providerEmail)
                 .orElseThrow(() -> new RuntimeException("Provider not found"));
         
-        if (!"service_provider".equals(provider.getRole())) {
+        if (provider.getRole() == null || !provider.getRole().toLowerCase().contains("provider")) {
             throw new RuntimeException("User is not a service provider");
         }
 
@@ -195,7 +210,7 @@ public class ProviderScheduleService {
             schedules = initializeDefaultSchedules(provider, tenant);
         }
 
-        List<TenantSchedule> tenantSchedules = tenantScheduleRepository.findByTenantId(tenant.getId());
+        List<TenantSchedule> tenantSchedules = tenant != null ? tenantScheduleRepository.findByTenantId(tenant.getId()) : new ArrayList<>();
 
         List<ProviderScheduleDTO> scheduleDTOs = schedules.stream().map(s -> {
             boolean isTenantActive = tenantSchedules.stream()
@@ -218,8 +233,9 @@ public class ProviderScheduleService {
         }).collect(Collectors.toList());
 
         return ProviderScheduleSettingsDTO.builder()
-                .timezone(tenant.getTimezone() != null ? tenant.getTimezone() : "Asia/Kathmandu")
-                .slotDuration(tenant.getSlotDuration() != null ? tenant.getSlotDuration() : 30)
+                .timezone(tenant != null && tenant.getTimezone() != null ? tenant.getTimezone() : "Asia/Kathmandu")
+                .slotDuration(tenant != null && tenant.getSlotDuration() != null ? tenant.getSlotDuration() : 30)
+                .isScheduleDelegated(provider.getIsScheduleDelegated() != null ? provider.getIsScheduleDelegated() : true)
                 .schedules(scheduleDTOs)
                 .build();
     }
@@ -228,43 +244,83 @@ public class ProviderScheduleService {
         User provider = userRepository.findByEmail(providerEmail)
                 .orElseThrow(() -> new RuntimeException("Provider not found"));
                 
-        if (!"service_provider".equals(provider.getRole())) {
+        if (provider.getRole() == null || !provider.getRole().toLowerCase().contains("provider")) {
             throw new RuntimeException("User is not a service provider");
         }
 
         Tenant tenant = provider.getTenant();
-        List<TenantSchedule> tenantSchedules = tenantScheduleRepository.findByTenantId(tenant.getId());
+        if (request.getIsScheduleDelegated() != null) {
+            boolean wasDelegated = Boolean.TRUE.equals(provider.getIsScheduleDelegated());
+            provider.setIsScheduleDelegated(request.getIsScheduleDelegated());
+            userRepository.save(provider);
 
-        for (ProviderScheduleDTO dto : request.getSchedules()) {
-            if (dto.getId() != null) {
-                ProviderSchedule schedule = providerScheduleRepository.findById(dto.getId()).orElse(null);
-                if (schedule != null && schedule.getProvider().getId().equals(provider.getId())) {
-                    // Prevent enabling if tenant is not active on this day
-                    boolean isTenantActive = tenantSchedules.stream()
-                            .filter(ts -> ts.getDayOfWeek().equals(schedule.getDayOfWeek()))
-                            .findFirst()
-                            .map(TenantSchedule::getIsActive)
-                            .orElse(true);
-                            
-                    schedule.setIsActive(isTenantActive && dto.getIsActive() != null ? dto.getIsActive() : false);
-                    schedule.setOpeningTime(dto.getOpeningTime());
-                    schedule.setClosingTime(dto.getClosingTime());
+            // If delegation was just enabled, immediately pull real clinic operating hours
+            if (Boolean.TRUE.equals(request.getIsScheduleDelegated()) && !wasDelegated && tenant != null) {
+                List<TenantSchedule> tenantSchedules = tenantScheduleRepository.findByTenantId(tenant.getId());
+                for (TenantSchedule ts : tenantSchedules) {
+                    ProviderSchedule ps = providerScheduleRepository.findByProviderAndDayOfWeek(provider, ts.getDayOfWeek())
+                            .orElseGet(() -> ProviderSchedule.builder()
+                                    .provider(provider)
+                                    .dayOfWeek(ts.getDayOfWeek())
+                                    .build());
+                    ps.setIsActive(ts.getIsActive());
+                    ps.setOpeningTime(ts.getOpeningTime());
+                    ps.setClosingTime(ts.getClosingTime());
+                    ps.setBreakStartTime(ts.getBreakStartTime());
+                    ps.setBreakEndTime(ts.getBreakEndTime());
+                    ps.setClosedMessage(ts.getClosedMessage());
+                    providerScheduleRepository.save(ps);
+                }
+            }
+        }
 
-                    // Validate break time bounds
-                    if (dto.getBreakStartTime() != null && dto.getBreakEndTime() != null && dto.getOpeningTime() != null && dto.getClosingTime() != null) {
-                        if (dto.getBreakStartTime().isBefore(dto.getOpeningTime()) || dto.getBreakEndTime().isAfter(dto.getClosingTime())) {
-                            throw new IllegalArgumentException("Break time must be within opening and closing hours on " + schedule.getDayOfWeek());
+        if (tenant != null && request.getTimezone() != null) {
+            tenant.setTimezone(request.getTimezone());
+            tenantRepository.save(tenant);
+        }
+
+        if (request.getSchedules() != null) {
+            for (ProviderScheduleDTO dto : request.getSchedules()) {
+                ProviderSchedule schedule = null;
+                if (dto.getId() != null) {
+                    schedule = providerScheduleRepository.findById(dto.getId()).orElse(null);
+                }
+                if (schedule == null && dto.getDayOfWeek() != null) {
+                    schedule = providerScheduleRepository.findByProviderAndDayOfWeek(provider, dto.getDayOfWeek()).orElse(null);
+                }
+                if (schedule == null && dto.getDayOfWeek() != null) {
+                    schedule = ProviderSchedule.builder()
+                            .provider(provider)
+                            .dayOfWeek(dto.getDayOfWeek())
+                            .build();
+                }
+
+                if (schedule != null) {
+                    boolean active = Boolean.TRUE.equals(dto.getIsActive());
+                    schedule.setIsActive(active);
+                    
+                    if (dto.getOpeningTime() != null) schedule.setOpeningTime(dto.getOpeningTime());
+                    if (dto.getClosingTime() != null) schedule.setClosingTime(dto.getClosingTime());
+
+                    // Validate break time bounds only if active
+                    if (active && dto.getBreakStartTime() != null && dto.getBreakEndTime() != null) {
+                        if (!dto.getBreakStartTime().isBefore(dto.getBreakEndTime())) {
+                            throw new IllegalArgumentException("Break start time must be before break end time on " + schedule.getDayOfWeek());
+                        }
+                        if (schedule.getOpeningTime() != null && schedule.getClosingTime() != null) {
+                            if (dto.getBreakStartTime().isBefore(schedule.getOpeningTime()) || dto.getBreakEndTime().isAfter(schedule.getClosingTime())) {
+                                throw new IllegalArgumentException("Break time must be within opening and closing hours on " + schedule.getDayOfWeek());
+                            }
                         }
                     }
 
-                    schedule.setBreakStartTime(dto.getBreakStartTime());
-                    schedule.setBreakEndTime(dto.getBreakEndTime());
+                    if (dto.getBreakStartTime() != null) schedule.setBreakStartTime(dto.getBreakStartTime());
+                    if (dto.getBreakEndTime() != null) schedule.setBreakEndTime(dto.getBreakEndTime());
                     
-                    // Clear closed message if active
                     if (schedule.getIsActive()) {
                         schedule.setClosedMessage(null);
                     } else {
-                        schedule.setClosedMessage(dto.getClosedMessage());
+                        schedule.setClosedMessage(dto.getClosedMessage() != null ? dto.getClosedMessage() : "Closed");
                     }
                     
                     providerScheduleRepository.save(schedule);

@@ -14,5 +14,6 @@ import java.util.List;
 public class ProviderScheduleSettingsDTO {
     private String timezone;
     private Integer slotDuration;
+    private Boolean isScheduleDelegated;
     private List<ProviderScheduleDTO> schedules;
 }

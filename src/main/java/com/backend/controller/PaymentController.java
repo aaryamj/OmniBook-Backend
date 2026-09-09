@@ -17,6 +17,15 @@ public class PaymentController {
     @Autowired
     private PaymentService paymentService;
 
+    @Autowired
+    private com.backend.repository.AppointmentRepository appointmentRepository;
+
+    @Autowired
+    private com.backend.repository.TenantRepository tenantRepository;
+
+    @Autowired
+    private com.backend.repository.UserRepository userRepository;
+
     @PostMapping("/initiate")
     public ResponseEntity<?> initiatePayment(@RequestBody PaymentRequestDTO request) {
         try {
@@ -78,6 +87,82 @@ public class PaymentController {
         } catch (Exception e) {
             e.printStackTrace();
             return ResponseEntity.status(302).location(URI.create("http://localhost:5173/payment-failed?error=exception")).build();
+        }
+    }
+
+    @GetMapping("/confirmation/{transactionId}")
+    public ResponseEntity<?> getBookingConfirmation(@PathVariable String transactionId) {
+        try {
+            java.util.List<com.backend.model.Appointment> appointments = appointmentRepository.findByTransactionId(transactionId);
+            if (appointments == null || appointments.isEmpty()) {
+                return ResponseEntity.status(404).body(Map.of("success", false, "message", "No booking found for transaction ID " + transactionId));
+            }
+
+            com.backend.model.Appointment first = appointments.get(0);
+            String orgName = "Organization";
+            String orgType = "Clinic";
+            String orgAddress = "";
+            String orgLogo = "";
+
+            if (first.getTenantId() != null) {
+                java.util.Optional<com.backend.model.Tenant> tenantOpt = tenantRepository.findById(first.getTenantId());
+                if (tenantOpt.isPresent()) {
+                    com.backend.model.Tenant tenant = tenantOpt.get();
+                    if (tenant.getOrganizationName() != null && !tenant.getOrganizationName().isBlank()) {
+                        orgName = tenant.getOrganizationName();
+                    }
+                    if (tenant.getOrganizationType() != null && !tenant.getOrganizationType().isBlank()) {
+                        orgType = tenant.getOrganizationType();
+                    }
+                    orgAddress = tenant.getAddress() != null ? tenant.getAddress() : "";
+                    orgLogo = tenant.getLogoUrl() != null ? tenant.getLogoUrl() : "";
+                }
+            }
+
+            String providerName = "";
+            if (first.getProviderId() != null) {
+                java.util.Optional<com.backend.model.User> providerOpt = userRepository.findById(first.getProviderId());
+                if (providerOpt.isPresent()) {
+                    providerName = providerOpt.get().getFullName();
+                }
+            }
+
+            java.util.List<Map<String, Object>> slotList = appointments.stream().map(a -> {
+                Map<String, Object> sm = new java.util.HashMap<>();
+                sm.put("id", a.getId());
+                sm.put("date", a.getAppointmentDate() != null ? a.getAppointmentDate().toString() : "");
+                sm.put("time", a.getAppointmentTime() != null ? a.getAppointmentTime().toString() : "");
+                sm.put("serviceName", a.getServiceName());
+                sm.put("price", a.getPrice());
+                return sm;
+            }).collect(java.util.stream.Collectors.toList());
+
+            double totalAmount = appointments.stream().mapToDouble(a -> a.getPrice() != null ? a.getPrice() : 0.0).sum();
+
+            Map<String, Object> result = new java.util.HashMap<>();
+            result.put("success", true);
+            result.put("transactionId", transactionId);
+            result.put("organizationName", orgName);
+            result.put("organizationType", orgType);
+            result.put("address", orgAddress);
+            result.put("logoUrl", orgLogo);
+            result.put("serviceName", first.getServiceName());
+            result.put("providerName", providerName);
+            result.put("patientName", first.getPatientName());
+            result.put("patientEmail", first.getPatientEmail());
+            result.put("appointmentDate", first.getAppointmentDate() != null ? first.getAppointmentDate().toString() : "");
+            result.put("appointmentTime", first.getAppointmentTime() != null ? first.getAppointmentTime().toString() : "");
+            result.put("appointmentType", first.getAppointmentType());
+            result.put("meetingLink", first.getMeetingLink());
+            result.put("paymentStatus", first.getPaymentStatus());
+            result.put("paymentMethod", first.getPaymentMethod());
+            result.put("totalAmount", totalAmount > 0 ? totalAmount : (first.getPrice() != null ? first.getPrice() : 0.0));
+            result.put("slots", slotList);
+
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return ResponseEntity.badRequest().body(Map.of("success", false, "message", "Error fetching confirmation: " + e.getMessage()));
         }
     }
 }

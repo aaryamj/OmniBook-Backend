@@ -2,6 +2,7 @@ package com.backend.service;
 
 import com.backend.dto.PaymentRequestDTO;
 import com.backend.model.Appointment;
+import com.backend.model.User;
 import com.backend.repository.AppointmentRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -11,6 +12,7 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import javax.crypto.Mac;
@@ -36,14 +38,61 @@ public class PaymentService {
     private com.backend.repository.NotificationRepository notificationRepository;
 
     @Autowired
+    private com.backend.service.NotificationService notificationService;
+
+    @Autowired
+    private com.backend.repository.UserRepository userRepository;
+
+    @Autowired
     private PublicBookingService publicBookingService;
+
+    @Autowired
+    private com.backend.repository.TenantRepository tenantRepository;
+
+    @Autowired
+    private com.backend.repository.ProviderServiceRepository providerServiceRepository;
+
+    @Autowired
+    private com.backend.repository.ProviderProfileRepository providerProfileRepository;
+
+    @Autowired
+    private TwilioSmsService twilioSmsService;
 
     @Transactional
     public Map<String, Object> initiatePayment(PaymentRequestDTO request) {
         String transactionId = UUID.randomUUID().toString().replace("-", "");
         
-        // For each selected slot, create an appointment record
-        for (String slotId : request.getSelectedSlots()) {
+        // Resolve user identity
+        Long bookedUserId = request.getUserId();
+        String userEmail = request.getPatientEmail() != null ? request.getPatientEmail().trim() : null;
+        if (bookedUserId == null && userEmail != null && !userEmail.isEmpty()) {
+            bookedUserId = userRepository.findByEmailIgnoringTenant(userEmail).map(User::getId).orElse(null);
+        }
+
+        String userIdentifier = bookedUserId != null ? ("UID_" + bookedUserId) : ("EMAIL_" + (userEmail != null ? userEmail.toLowerCase() : "GUEST"));
+        String userBookingLock = ("USER_BOOKING_" + userIdentifier).intern();
+
+        synchronized (userBookingLock) {
+            LocalDate today = LocalDate.now(java.time.ZoneId.of("Asia/Kathmandu"));
+            long activeUpcomingCount = appointmentRepository.countActiveUpcomingAppointmentsForUser(
+                    bookedUserId,
+                    userEmail,
+                    today
+            );
+            int requestedCount = request.getSelectedSlots() != null ? request.getSelectedSlots().size() : 0;
+            if (activeUpcomingCount + requestedCount > 3) {
+                if (activeUpcomingCount >= 3) {
+                    throw new RuntimeException("You have reached the maximum limit of 3 active appointments.");
+                } else {
+                    long remaining = Math.max(0, 3 - activeUpcomingCount);
+                    throw new RuntimeException("You can only book " + remaining + " more appointment(s). You currently have " + activeUpcomingCount + " active appointment(s).");
+                }
+            }
+
+            java.util.Set<String> requestDateTimeSlots = new java.util.HashSet<>();
+
+            // For each selected slot, create an appointment record
+            for (String slotId : request.getSelectedSlots()) {
             String dateStr = LocalDate.now().toString(); // Default to today
             String[] parts = slotId.split("-");
             if (parts.length >= 4) {
@@ -87,15 +136,114 @@ public class PaymentService {
                 e.printStackTrace();
             }
 
-            String aptType = request.getAppointmentType() != null ? request.getAppointmentType() : "IN_PERSON";
+            boolean serviceAllowsVirtual = false;
+            if (request.getServiceName() != null && request.getTenantId() != null) {
+                try {
+                    List<com.backend.model.ProviderService> tenantServices = providerServiceRepository.findByTenantId(request.getTenantId());
+                    serviceAllowsVirtual = tenantServices.stream()
+                            .filter(s -> s.getServiceName() != null && s.getServiceName().equalsIgnoreCase(request.getServiceName()))
+                            .anyMatch(s -> Boolean.TRUE.equals(s.getIsTelemedicine()));
+                } catch (Exception ignored) {}
+            }
+
+            String aptType = "IN_PERSON";
             String meetingLink = null;
-            if ("VIRTUAL".equalsIgnoreCase(aptType) || (request.getServiceName() != null && request.getServiceName().toLowerCase().contains("telemedicine"))) {
+            if (serviceAllowsVirtual && ("VIRTUAL".equalsIgnoreCase(request.getAppointmentType()) || (request.getServiceName() != null && request.getServiceName().toLowerCase().contains("telemedicine")))) {
                 aptType = "VIRTUAL";
                 meetingLink = "https://meet.jit.si/OmniBook-" + UUID.randomUUID().toString();
             }
 
+            LocalDate aptDate = LocalDate.parse(dateStr);
+            java.time.ZoneId zoneId = java.time.ZoneId.of("Asia/Kathmandu");
+            LocalTime nowTime = LocalTime.now(zoneId);
+
+            if (aptDate.isBefore(today)) {
+                throw new RuntimeException("Cannot book appointment for a past date: " + aptDate);
+            }
+            if (aptDate.isEqual(today) && appointmentTime.isBefore(nowTime)) {
+                throw new RuntimeException("Cannot book appointment for a past time: " + appointmentTime);
+            }
+
+            // Prevent user from selecting the exact same date & time slot multiple times in the same request batch
+            String dateTimeSlotKey = aptDate.toString() + "_" + appointmentTime.toString();
+            if (!requestDateTimeSlots.add(dateTimeSlotKey)) {
+                throw new RuntimeException("You already have an appointment booked for this date and time.");
+            }
+
+            // Determine max capacity for this service
+            int maxCapacity = 1;
+            if (request.getServiceName() != null && request.getProviderId() != null) {
+                User providerUser = userRepository.findById(request.getProviderId()).orElse(null);
+                if (providerUser != null) {
+                    com.backend.model.ProviderProfile pProfile = providerProfileRepository.findByUser(providerUser).orElse(null);
+                    if (pProfile != null) {
+                        maxCapacity = providerServiceRepository.findByProviderProfile(pProfile).stream()
+                                .filter(s -> s.getServiceName() != null && s.getServiceName().equalsIgnoreCase(request.getServiceName()))
+                                .map(com.backend.model.ProviderService::getMaxCapacity)
+                                .filter(java.util.Objects::nonNull)
+                                .findFirst()
+                                .orElse(1);
+                    }
+                    if (maxCapacity == 1 && providerUser.getTenant() != null) {
+                        maxCapacity = providerServiceRepository.findByTenantId(providerUser.getTenant().getId()).stream()
+                                .filter(s -> s.getServiceName() != null && s.getServiceName().equalsIgnoreCase(request.getServiceName()))
+                                .map(com.backend.model.ProviderService::getMaxCapacity)
+                                .filter(java.util.Objects::nonNull)
+                                .findFirst()
+                                .orElse(1);
+                    }
+                }
+            }
+
+            final LocalTime checkTime = appointmentTime;
+            final int allowedCapacity = Math.max(1, maxCapacity);
+
+            // Concurrency-safe lock per user & slot and per provider slot capacity
+            String userLockKey = ("USER_SLOT_" + userIdentifier + "_" + aptDate + "_" + checkTime).intern();
+            String slotLockKey = ("SLOT_CAPACITY_" + request.getProviderId() + "_" + aptDate + "_" + checkTime).intern();
+
+            synchronized (userLockKey) {
+                synchronized (slotLockKey) {
+                    // 1. Verify this user does not already have an active appointment for this exact date and time
+                    boolean alreadyBooked = appointmentRepository.existsActiveAppointmentForUserAtSlot(
+                            bookedUserId,
+                            userEmail,
+                            aptDate,
+                            checkTime
+                    );
+                    if (alreadyBooked) {
+                        throw new RuntimeException("You already have an appointment booked for this date and time.");
+                    }
+
+                    // 2. Verify slot capacity has not been exhausted
+                    long activeBookings = appointmentRepository.countActiveAppointmentsForSlot(request.getProviderId(), aptDate, checkTime);
+                    if (activeBookings >= allowedCapacity) {
+                        throw new RuntimeException("This time slot (" + appointmentTime + ") has reached its maximum capacity (" + allowedCapacity + " seats). Please select another slot.");
+                    }
+
+                    String customerRole = "client";
+                    if (request.getTenantId() != null) {
+                        com.backend.model.Tenant tenant = tenantRepository.findById(request.getTenantId()).orElse(null);
+                        if (tenant != null && tenant.getOrganizationType() != null) {
+                            String ot = tenant.getOrganizationType().toLowerCase();
+                            if (ot.contains("college") || ot.contains("univ") || ot.contains("school") || ot.contains("educ")) {
+                                customerRole = "student";
+                            } else if (ot.contains("clinic") || ot.contains("hosp") || ot.contains("med")) {
+                                customerRole = "patient";
+                            }
+                        }
+                    }
+
+            Long tenantId = request.getTenantId();
+            if (tenantId == null && request.getProviderId() != null) {
+                User providerUser = userRepository.findById(request.getProviderId()).orElse(null);
+                if (providerUser != null && providerUser.getTenant() != null) {
+                    tenantId = providerUser.getTenant().getId();
+                }
+            }
+
             Appointment appointment = Appointment.builder()
-                    .tenantId(request.getTenantId())
+                    .tenantId(tenantId)
                     .providerId(request.getProviderId())
                     .patientName(request.getPatientName())
                     .patientPhone(request.getPatientPhone())
@@ -107,12 +255,32 @@ public class PaymentService {
                     .price(price)
                     .appointmentType(aptType)
                     .meetingLink(meetingLink)
+                    .videoCallEnabled("VIRTUAL".equalsIgnoreCase(aptType))
                     .paymentStatus("PENDING")
                     .paymentMethod(request.getPaymentMethod() != null ? request.getPaymentMethod() : "ESEWA")
                     .transactionId(transactionId)
+                    .bookedAt(java.time.LocalDateTime.now())
+                    .bookedByName(request.getPatientName())
+                    .bookedByRole(customerRole)
+                    .bookedByUserId(bookedUserId)
                     .build();
-                    
-            appointmentRepository.save(appointment);
+
+            try {
+                appointmentRepository.save(appointment);
+            } catch (org.springframework.dao.DataIntegrityViolationException dive) {
+                String msg = dive.getMessage() != null ? dive.getMessage().toLowerCase() : "";
+                Throwable root = dive.getRootCause();
+                if (root != null && root.getMessage() != null) {
+                    msg += " " + root.getMessage().toLowerCase();
+                }
+                if (msg.contains("uq_active_user_slot") || msg.contains("active_user_slot") || msg.contains("duplicate entry")) {
+                    throw new RuntimeException("You already have an appointment booked for this date and time.");
+                }
+                throw dive;
+            }
+                }
+            }
+        }
         }
 
         Map<String, Object> response = new HashMap<>();
@@ -204,19 +372,10 @@ public class PaymentService {
             }
             
             try {
-                // Create a notification for the provider
                 Appointment firstApp = appointments.get(0);
-                com.backend.model.Notification notification = com.backend.model.Notification.builder()
-                        .userId(firstApp.getProviderId())
-                        .title("Booking Requested")
-                        .message("New booking request from " + firstApp.getPatientName() + " for " + firstApp.getServiceName())
-                        .type("BOOKING_REQUEST")
-                        .isRead(false)
-                        .createdAt(java.time.LocalDateTime.now())
-                        .build();
-                notificationRepository.save(notification);
-                
+                notificationService.notifyBookingConfirmed(firstApp);
                 emailService.sendAppointmentApprovedEmail(firstApp);
+                twilioSmsService.sendBookingConfirmationSms(firstApp);
             } catch(Exception e) {
                 e.printStackTrace();
             }
@@ -245,17 +404,9 @@ public class PaymentService {
                     
                     try {
                         Appointment firstApp = appointments.get(0);
-                        com.backend.model.Notification notification = com.backend.model.Notification.builder()
-                                .userId(firstApp.getProviderId())
-                                .title("Booking Requested (Stripe)")
-                                .message("New booking request from " + firstApp.getPatientName() + " for " + firstApp.getServiceName())
-                                .type("BOOKING_REQUEST")
-                                .isRead(false)
-                                .createdAt(java.time.LocalDateTime.now())
-                                .build();
-                        notificationRepository.save(notification);
-                        
+                        notificationService.notifyBookingConfirmed(firstApp);
                         emailService.sendAppointmentApprovedEmail(firstApp);
+                        twilioSmsService.sendBookingConfirmationSms(firstApp);
                     } catch (Exception e) {
                         e.printStackTrace();
                     }

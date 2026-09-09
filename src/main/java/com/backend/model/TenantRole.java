@@ -33,6 +33,9 @@ public class TenantRole {
     @Column(nullable = false)
     private String privilegeLevel;
 
+    @Column(columnDefinition = "TEXT")
+    private String permissionsJson;
+
     private LocalDateTime createdAt;
 
     @PrePersist

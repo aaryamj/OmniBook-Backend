@@ -24,7 +24,7 @@ public class ProviderScheduleController {
     }
 
     @GetMapping("/provider/schedule/me")
-    @PreAuthorize("hasRole('SERVICE_PROVIDER')")
+    @PreAuthorize("hasAnyRole('SERVICE_PROVIDER', 'PROVIDER')")
     public ResponseEntity<ProviderScheduleSettingsDTO> getMySchedule(Principal principal) {
         return ResponseEntity.ok(providerScheduleService.getMyScheduleSettings(principal.getName()));
     }
@@ -39,7 +39,7 @@ public class ProviderScheduleController {
     }
 
     @PutMapping("/provider/schedule/me")
-    @PreAuthorize("hasRole('SERVICE_PROVIDER')")
+    @PreAuthorize("hasAnyRole('SERVICE_PROVIDER', 'PROVIDER')")
     public ResponseEntity<ProviderScheduleSettingsDTO> updateMySchedule(
             Principal principal,
             @RequestBody ProviderScheduleSettingsDTO request) {

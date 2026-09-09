@@ -2,8 +2,10 @@ package com.backend.service;
 
 import com.backend.config.JwtService;
 import com.backend.dto.AuthResponse;
+import com.backend.dto.ForgotPasswordRequest;
 import com.backend.dto.LoginRequest;
 import com.backend.dto.RegisterRequest;
+import com.backend.dto.ResetPasswordRequest;
 import com.backend.dto.VerifyRequest;
 import com.backend.model.User;
 import com.backend.repository.UserRepository;
@@ -49,6 +51,7 @@ public class AuthService {
     private final NotificationService notificationService;
     private final TenantRepository tenantRepository;
     private final UserSessionService userSessionService;
+    private final TwilioSmsService twilioSmsService;
 
     public AuthResponse register(RegisterRequest request) {
         // Check uniqueness
@@ -151,6 +154,7 @@ public class AuthService {
                 .phone(request.getPhone())
                 .password(passwordEncoder.encode(request.getPassword()))
                 .role(invitation.getRole())
+                .profilePicture(request.getProfilePicture())
                 .enabled(true)
                 .tenant(tenant)
                 .build();
@@ -175,6 +179,10 @@ public class AuthService {
                 .token(jwtToken)
                 .role(user.getRole())
                 .fullName(user.getFullName())
+                .organizationName(tenant != null ? tenant.getOrganizationName() : null)
+                .organizationType(tenant != null ? tenant.getOrganizationType() : "Clinic")
+                .primaryAccentColor(tenant != null ? tenant.getPrimaryAccentColor() : null)
+                .profilePicture(user.getProfilePicture() != null ? user.getProfilePicture() : (tenant != null ? tenant.getLogoUrl() : null))
                 .build();
     }
 
@@ -198,11 +206,14 @@ public class AuthService {
         return AuthResponse.builder()
                 .success(true)
                 .message(invitation.getEmail())
+                .role(invitation.getRole())
                 .subscriptionTier(invitation.getTier())
                 .specialization(invitation.getSpecialization())
                 .fullName(invitation.getFullName())
                 .phone(invitation.getPhone())
                 .organizationName(invitation.getTenant() != null ? invitation.getTenant().getOrganizationName() : null)
+                .organizationType(invitation.getTenant() != null ? invitation.getTenant().getOrganizationType() : "Clinic")
+                .primaryAccentColor(invitation.getTenant() != null ? invitation.getTenant().getPrimaryAccentColor() : null)
                 .build();
     }
 
@@ -248,6 +259,9 @@ public class AuthService {
             
             userRepository.save(user);
             emailService.sendVerificationEmail(user.getEmail(), code);
+            if (user.getPhone() != null && !user.getPhone().isBlank()) {
+                twilioSmsService.sendTwoFactorOtpSms(user.getPhone(), code);
+            }
             
             return AuthResponse.builder()
                     .success(true)
@@ -264,13 +278,7 @@ public class AuthService {
         String jwtToken = jwtService.generateToken(user);
         userSessionService.createSession(user, jwtToken, httpRequest);
 
-        return AuthResponse.builder()
-                .success(true)
-                .message("Login successful")
-                .token(jwtToken)
-                .role(user.getRole())
-                .fullName(user.getFullName())
-                .build();
+        return buildAuthResponse(user, jwtToken, "Login successful");
     }
 
     public AuthResponse verify2FA(VerifyRequest request, HttpServletRequest httpRequest) {
@@ -299,13 +307,63 @@ public class AuthService {
         String jwtToken = jwtService.generateToken(user);
         userSessionService.createSession(user, jwtToken, httpRequest);
 
+        return buildAuthResponse(user, jwtToken, "Login successful");
+    }
+
+    public AuthResponse buildAuthResponse(User user, String jwtToken, String message) {
+        String profilePic = user.getProfilePicture();
+        if (profilePic == null || profilePic.isBlank()) {
+            if ("service_provider".equalsIgnoreCase(user.getRole()) || "provider".equalsIgnoreCase(user.getRole())) {
+                profilePic = providerProfileRepository.findByUser(user)
+                        .map(com.backend.model.ProviderProfile::getProfilePictureUrl)
+                        .filter(url -> url != null && !url.isBlank())
+                        .orElse(null);
+            } else if ("admin".equalsIgnoreCase(user.getRole())) {
+                profilePic = (user.getTenant() != null) ? user.getTenant().getLogoUrl() : null;
+            }
+            // For role "user", profilePic stays null! Regular users do not inherit the admin's logo.
+        }
+
+        String orgLogo = (user.getTenant() != null) ? user.getTenant().getLogoUrl() : null;
+        boolean userTwoStep = userSettingsRepository.findByUser(user).map(UserSettings::isTwoStepEnabled).orElse(false);
+        boolean tenantTwoStep = user.getTenant() != null && Boolean.TRUE.equals(user.getTenant().getTwoFactorEnabled());
+
         return AuthResponse.builder()
                 .success(true)
-                .message("Login successful")
+                .message(message)
                 .token(jwtToken)
+                .id(user.getId())
+                .email(user.getEmail())
                 .role(user.getRole())
                 .fullName(user.getFullName())
+                .phone(user.getPhone())
+                .tenantId(user.getTenant() != null ? user.getTenant().getId() : null)
+                .organizationName(user.getTenant() != null ? user.getTenant().getOrganizationName() : null)
+                .organizationType(user.getTenant() != null ? user.getTenant().getOrganizationType() : null)
+                .primaryAccentColor(user.getTenant() != null ? user.getTenant().getPrimaryAccentColor() : null)
+                .profilePicture(profilePic)
+                .organizationLogo(orgLogo)
+                .twoStepEnabled(userTwoStep || tenantTwoStep)
+                .tenantRoleName(user.getTenantRole() != null ? user.getTenantRole().getRoleName() : null)
+                .accessScope(user.getTenantRole() != null ? user.getTenantRole().getAccessScope() : null)
+                .privilegeLevel(user.getTenantRole() != null ? user.getTenantRole().getPrivilegeLevel() : null)
+                .permissionsJson(user.getTenantRole() != null ? user.getTenantRole().getPermissionsJson() : null)
                 .build();
+    }
+
+    public AuthResponse getAuthenticatedUser(String email) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        return buildAuthResponse(user, null, "User profile retrieved successfully");
+    }
+
+    public void logout(String token) {
+        if (token != null && !token.isBlank()) {
+            if (token.startsWith("Bearer ")) {
+                token = token.substring(7).trim();
+            }
+            userSessionService.invalidateSession(token);
+        }
     }
 
     public AuthResponse processGoogleOAuth(OAuthLoginRequest request, HttpServletRequest httpRequest) {
@@ -383,6 +441,8 @@ public class AuthService {
                 .token(jwtToken)
                 .role(user.getRole())
                 .fullName(user.getFullName())
+                .phone(user.getPhone())
+                .profilePicture(user.getProfilePicture() != null ? user.getProfilePicture() : (user.getTenant() != null ? user.getTenant().getLogoUrl() : null))
                 .build();
     }
 
@@ -390,5 +450,117 @@ public class AuthService {
         Random random = new Random();
         int code = 100000 + random.nextInt(900000);
         return String.valueOf(code);
+    }
+
+    public AuthResponse forgotPassword(ForgotPasswordRequest request) {
+        String email = request.getEmail().trim();
+        Optional<User> userOpt = userRepository.findByEmailIgnoringTenant(email);
+
+        if (userOpt.isEmpty()) {
+            return AuthResponse.builder()
+                    .success(false)
+                    .message("No account found with this email address.")
+                    .build();
+        }
+
+        User user = userOpt.get();
+        String resetToken = UUID.randomUUID().toString();
+        user.setResetPasswordToken(resetToken);
+        user.setResetPasswordExpiry(LocalDateTime.now().plusHours(2));
+        userRepository.save(user);
+
+        String orgName = null;
+        String orgType = null;
+        if (user.getTenant() != null) {
+            orgName = user.getTenant().getOrganizationName();
+            orgType = user.getTenant().getOrganizationType();
+        }
+
+        try {
+            emailService.sendPasswordResetEmail(user.getEmail(), resetToken, orgName, orgType);
+        } catch (Exception e) {
+            return AuthResponse.builder()
+                    .success(false)
+                    .message("Failed to send reset email. Please try again later.")
+                    .build();
+        }
+
+        return AuthResponse.builder()
+                .success(true)
+                .message("Password reset instructions have been sent to your email.")
+                .build();
+    }
+
+    public Map<String, Object> validateResetToken(String token) {
+        if (token == null || token.isBlank()) {
+            return Map.of("valid", false, "message", "Reset token is missing");
+        }
+
+        Optional<User> userOpt = userRepository.findByResetPasswordTokenIgnoringTenant(token);
+        if (userOpt.isEmpty()) {
+            return Map.of("valid", false, "message", "Invalid or expired reset token");
+        }
+
+        User user = userOpt.get();
+        if (user.getResetPasswordExpiry() == null || user.getResetPasswordExpiry().isBefore(LocalDateTime.now())) {
+            return Map.of("valid", false, "message", "Reset token has expired");
+        }
+
+        Map<String, Object> result = new java.util.HashMap<>();
+        result.put("valid", true);
+        result.put("email", user.getEmail());
+        result.put("fullName", user.getFullName() != null ? user.getFullName() : "");
+        result.put("role", user.getRole() != null ? user.getRole() : "");
+        if (user.getTenant() != null) {
+            result.put("organizationName", user.getTenant().getOrganizationName());
+            result.put("organizationType", user.getTenant().getOrganizationType());
+            result.put("primaryAccentColor", user.getTenant().getPrimaryAccentColor());
+            result.put("logoUrl", user.getTenant().getLogoUrl());
+        }
+        return result;
+    }
+
+    public AuthResponse resetPassword(ResetPasswordRequest request) {
+        String token = request.getToken();
+        if (token == null || token.isBlank()) {
+            return AuthResponse.builder()
+                    .success(false)
+                    .message("Invalid token")
+                    .build();
+        }
+
+        Optional<User> userOpt = userRepository.findByResetPasswordTokenIgnoringTenant(token);
+        if (userOpt.isEmpty()) {
+            return AuthResponse.builder()
+                    .success(false)
+                    .message("Invalid or expired reset token.")
+                    .build();
+        }
+
+        User user = userOpt.get();
+        if (user.getResetPasswordExpiry() == null || user.getResetPasswordExpiry().isBefore(LocalDateTime.now())) {
+            return AuthResponse.builder()
+                    .success(false)
+                    .message("Reset token has expired. Please request a new one.")
+                    .build();
+        }
+
+        if (request.getNewPassword() == null || request.getNewPassword().length() < 6) {
+            return AuthResponse.builder()
+                    .success(false)
+                    .message("Password must be at least 6 characters long.")
+                    .build();
+        }
+
+        user.setPassword(passwordEncoder.encode(request.getNewPassword()));
+        user.setResetPasswordToken(null);
+        user.setResetPasswordExpiry(null);
+        user.setUpdatedAt(LocalDateTime.now());
+        userRepository.save(user);
+
+        return AuthResponse.builder()
+                .success(true)
+                .message("Password has been reset successfully! You can now log in with your new password.")
+                .build();
     }
 }

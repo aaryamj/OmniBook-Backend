@@ -18,6 +18,12 @@ public class UserProfileDto {
     private String country;
     private String profilePicture;
     private Boolean twoStepEnabled;
+    private String role;
+    private String organizationName;
+    private String organizationType;
+    private String logoUrl;
+    private String tenantAdminName;
+    private String tenantAdminEmail;
     
     // Patient Profile Fields
     private String dateOfBirth;

@@ -23,11 +23,14 @@ public class ProviderProfileService {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("User not found"));
                 
-        if (!"service_provider".equals(user.getRole())) {
+        if (user.getRole() == null || !user.getRole().toLowerCase().contains("provider")) {
             throw new RuntimeException("User is not a service provider");
         }
 
         ProviderProfile profile = providerProfileRepository.findByUser(user).orElse(null);
+        String picUrl = profile != null && profile.getProfilePictureUrl() != null && !profile.getProfilePictureUrl().isEmpty()
+                ? profile.getProfilePictureUrl()
+                : user.getProfilePicture();
 
         return ProviderProfileDTO.builder()
                 .fullName(user.getFullName())
@@ -36,7 +39,7 @@ public class ProviderProfileService {
                 .specialization(profile != null && profile.getPrimarySpecialty() != null ? profile.getPrimarySpecialty() : user.getSpecialization())
                 .licenseNumber(profile != null && profile.getMedicalLicense() != null ? profile.getMedicalLicense() : user.getLicenseNumber())
                 .isScheduleDelegated(user.getIsScheduleDelegated() != null ? user.getIsScheduleDelegated() : true)
-                .profilePictureUrl(profile != null ? profile.getProfilePictureUrl() : null)
+                .profilePictureUrl(picUrl)
                 .build();
     }
 
@@ -44,15 +47,13 @@ public class ProviderProfileService {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("User not found"));
                 
-        if (!"service_provider".equals(user.getRole())) {
+        if (user.getRole() == null || !user.getRole().toLowerCase().contains("provider")) {
             throw new RuntimeException("User is not a service provider");
         }
 
         if (dto.getFullName() != null) user.setFullName(dto.getFullName());
         if (dto.getPhone() != null) user.setPhone(dto.getPhone());
         if (dto.getIsScheduleDelegated() != null) user.setIsScheduleDelegated(dto.getIsScheduleDelegated());
-
-        userRepository.save(user);
 
         ProviderProfile profile = providerProfileRepository.findByUser(user)
                 .orElseGet(() -> {
@@ -64,19 +65,19 @@ public class ProviderProfileService {
         boolean profileUpdated = false;
         if (dto.getSpecialization() != null) {
             profile.setPrimarySpecialty(dto.getSpecialization());
-            user.setSpecialization(dto.getSpecialization()); // Keep in sync for now
+            user.setSpecialization(dto.getSpecialization());
             profileUpdated = true;
         }
         if (dto.getLicenseNumber() != null) {
             profile.setMedicalLicense(dto.getLicenseNumber());
-            user.setLicenseNumber(dto.getLicenseNumber()); // Keep in sync for now
+            user.setLicenseNumber(dto.getLicenseNumber());
             profileUpdated = true;
         }
         
         if (profileUpdated) {
             providerProfileRepository.save(profile);
-            userRepository.save(user);
         }
+        userRepository.save(user);
 
         return getProfile(email);
     }
@@ -100,6 +101,9 @@ public class ProviderProfileService {
                     .toUriString();
             profile.setProfilePictureUrl(logoUrl);
             providerProfileRepository.save(profile);
+
+            user.setProfilePicture(logoUrl);
+            userRepository.save(user);
         }
 
         return getProfile(email);

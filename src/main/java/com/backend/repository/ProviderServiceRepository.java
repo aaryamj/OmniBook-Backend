@@ -11,4 +11,7 @@ public interface ProviderServiceRepository extends JpaRepository<ProviderService
 
     @org.springframework.data.jpa.repository.Query("SELECT DISTINCT p.serviceName FROM ProviderService p WHERE p.providerProfile.user.tenant.id = :tenantId AND p.isActive = true")
     List<String> findDistinctServiceNamesByTenantId(@org.springframework.data.repository.query.Param("tenantId") Long tenantId);
+
+    @org.springframework.data.jpa.repository.Query("SELECT p FROM ProviderService p WHERE p.providerProfile.user.tenant.id = :tenantId")
+    List<ProviderService> findByTenantId(@org.springframework.data.repository.query.Param("tenantId") Long tenantId);
 }

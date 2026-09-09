@@ -10,5 +10,6 @@ public class RoleResponse {
     private String roleName;
     private String accessScope;
     private String privilegeLevel;
+    private String permissionsJson;
     private Long assignedUsers;
 }

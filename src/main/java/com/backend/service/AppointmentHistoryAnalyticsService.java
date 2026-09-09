@@ -140,7 +140,7 @@ public class AppointmentHistoryAnalyticsService {
 
         // 6. Build Human-Readable Pattern Summary
         StringBuilder summaryBuilder = new StringBuilder();
-        summaryBuilder.append("Patient has ").append(totalCount).append(" previous appointments. ");
+        summaryBuilder.append("User has completed ").append(totalCount).append(" previous appointment(s). ");
         if (!preferredDays.isEmpty()) {
             summaryBuilder.append("Frequently books on ").append(preferredDays.get(0).name());
             if (preferredDays.size() > 1) {
@@ -148,13 +148,13 @@ public class AppointmentHistoryAnalyticsService {
             }
             summaryBuilder.append(". ");
         }
-        summaryBuilder.append("Prefers ").append(preferredTimeOfDay.toLowerCase()).append(" appointments (around ")
+        summaryBuilder.append("Prefers ").append(preferredTimeOfDay.toLowerCase()).append(" slots (around ")
                 .append(avgTime.toString()).append("). ");
         if (avgGapDays != null && avgGapDays > 0) {
-            summaryBuilder.append("Typical visit frequency is every ").append(Math.round(avgGapDays)).append(" days. ");
+            summaryBuilder.append("Typical booking frequency is every ").append(Math.round(avgGapDays)).append(" days. ");
         }
         if (preferredProviderName != null) {
-            summaryBuilder.append("Frequently consults Dr. ").append(preferredProviderName).append(". ");
+            summaryBuilder.append("Frequently schedules with ").append(preferredProviderName).append(". ");
         }
 
         return PatientAppointmentPatternDTO.builder()

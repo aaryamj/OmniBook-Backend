@@ -118,6 +118,13 @@
 			<version>1.3.30</version>
 		</dependency>
 
+		<!-- Twilio SMS SDK -->
+		<dependency>
+			<groupId>com.twilio.sdk</groupId>
+			<artifactId>twilio</artifactId>
+			<version>10.1.1</version>
+		</dependency>
+
 	</dependencies>
 
 	<build>

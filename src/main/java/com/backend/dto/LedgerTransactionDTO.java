@@ -15,6 +15,7 @@ public class LedgerTransactionDTO {
     private String time;
     private String patientInitials;
     private String patientName;
+    private String patientProfilePicture;
     private String service;
     private String patientColor;
     private String gateway;

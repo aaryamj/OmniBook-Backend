@@ -37,7 +37,58 @@ public class ProviderController {
     private final com.backend.repository.AppointmentRepository appointmentRepository;
     private final com.backend.service.EmailService emailService;
     private final com.backend.repository.NotificationRepository notificationRepository;
+    private final com.backend.service.NotificationService notificationService;
     private final com.backend.repository.ReminderRepository reminderRepository;
+    private final com.backend.repository.TenantRepository tenantRepository;
+    private final com.backend.service.ProviderAnalyticsService providerAnalyticsService;
+    private final com.backend.service.AuditLogService auditLogService;
+    private final com.backend.service.AdminService adminService;
+
+    @GetMapping("/profile")
+    public ResponseEntity<?> getProfile() {
+        try {
+            UserDetails userDetails = (UserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+            User user = userRepository.findByEmail(userDetails.getUsername())
+                    .orElseThrow(() -> new RuntimeException("User not found"));
+
+            Optional<ProviderProfile> existingProfile = providerProfileRepository.findByUser(user);
+            ProviderProfile profile = existingProfile.orElse(null);
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("fullName", user.getFullName());
+            response.put("email", user.getEmail());
+            response.put("phone", user.getPhone());
+            response.put("role", user.getRole());
+            response.put("profilePicture", user.getProfilePicture());
+
+            if (user.getTenant() != null) {
+                com.backend.model.Tenant tenant = user.getTenant();
+                response.put("tenantId", tenant.getId());
+                response.put("organizationName", tenant.getOrganizationName());
+                response.put("organizationType", tenant.getOrganizationType());
+                response.put("primaryAccentColor", tenant.getPrimaryAccentColor());
+                response.put("logoUrl", tenant.getLogoUrl());
+            }
+
+            if (profile != null) {
+                response.put("credentials", profile.getCredentials());
+                response.put("medicalLicense", profile.getMedicalLicense());
+                response.put("primarySpecialty", profile.getPrimarySpecialty());
+                response.put("profilePictureUrl", profile.getProfilePictureUrl() != null ? profile.getProfilePictureUrl() : user.getProfilePicture());
+                response.put("licenseImageUrl", profile.getLicenseImageUrl());
+                response.put("status", profile.getStatus() != null ? profile.getStatus().name() : null);
+                response.put("tier", profile.getTier());
+            }
+
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", false);
+            response.put("message", "Error fetching provider profile: " + e.getMessage());
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
 
     @PutMapping("/profile")
     public ResponseEntity<?> updateProfile(
@@ -124,6 +175,7 @@ public class ProviderController {
                 service.setIsTelemedicine(serviceDto.getIsTelemedicine());
                 service.setCategory(serviceDto.getCategory());
                 service.setIsActive(serviceDto.getIsActive() != null ? serviceDto.getIsActive() : true);
+                service.setMaxCapacity(serviceDto.getMaxCapacity() != null && serviceDto.getMaxCapacity() > 0 ? serviceDto.getMaxCapacity() : 1);
                 providerServiceRepository.save(service);
             }
 
@@ -149,10 +201,15 @@ public class ProviderController {
             User user = userRepository.findByEmail(userDetails.getUsername())
                     .orElseThrow(() -> new RuntimeException("User not found"));
 
-            ProviderProfile profile = providerProfileRepository.findByUser(user)
-                    .orElseThrow(() -> new RuntimeException("Provider profile not found"));
+            List<ProviderService> services = new java.util.ArrayList<>();
+            java.util.Optional<ProviderProfile> profileOpt = providerProfileRepository.findByUser(user);
+            if (profileOpt.isPresent()) {
+                services = providerServiceRepository.findByProviderProfile(profileOpt.get());
+            }
 
-            List<ProviderService> services = providerServiceRepository.findByProviderProfile(profile);
+            if (services.isEmpty() && user.getTenant() != null) {
+                services = providerServiceRepository.findByTenantId(user.getTenant().getId());
+            }
 
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
@@ -184,6 +241,7 @@ public class ProviderController {
             service.setIsTelemedicine(serviceDto.getIsTelemedicine());
             service.setCategory(serviceDto.getCategory());
             service.setIsActive(serviceDto.getIsActive() != null ? serviceDto.getIsActive() : true);
+            service.setMaxCapacity(serviceDto.getMaxCapacity() != null && serviceDto.getMaxCapacity() > 0 ? serviceDto.getMaxCapacity() : 1);
             ProviderService savedService = providerServiceRepository.save(service);
 
             Map<String, Object> response = new HashMap<>();
@@ -222,6 +280,9 @@ public class ProviderController {
             if (serviceDto.getIsTelemedicine() != null) service.setIsTelemedicine(serviceDto.getIsTelemedicine());
             if (serviceDto.getCategory() != null) service.setCategory(serviceDto.getCategory());
             if (serviceDto.getIsActive() != null) service.setIsActive(serviceDto.getIsActive());
+            if (serviceDto.getMaxCapacity() != null && serviceDto.getMaxCapacity() > 0) {
+                service.setMaxCapacity(serviceDto.getMaxCapacity());
+            }
 
             ProviderService updatedService = providerServiceRepository.save(service);
 
@@ -269,6 +330,41 @@ public class ProviderController {
         }
     }
 
+    private boolean hasCalendarWritePermission(User user) {
+        if (user == null) return false;
+        // Primary admin or users without role restriction have write access
+        if (user.getTenantRole() == null || "admin".equalsIgnoreCase(user.getRole())) {
+            return true;
+        }
+        String json = user.getTenantRole().getPermissionsJson();
+        if (json == null || json.trim().isEmpty()) {
+            return true;
+        }
+        try {
+            java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+                "\"calendar\"\\s*:\\s*\\{[^}]*\"write\"\\s*:\\s*true", 
+                java.util.regex.Pattern.CASE_INSENSITIVE
+            );
+            return pattern.matcher(json).find();
+        } catch (Exception ignored) {
+        }
+        return false;
+    }
+
+    private boolean canManageAppointment(User user, Appointment appointment) {
+        if (appointment == null) return false;
+        if (appointment.getProviderId() != null && appointment.getProviderId().equals(user.getId())) {
+            return true;
+        }
+        boolean isAdmin = "admin".equalsIgnoreCase(user.getRole()) 
+                || "role_admin".equalsIgnoreCase(user.getRole()) 
+                || "super_admin".equalsIgnoreCase(user.getRole());
+        if (isAdmin && user.getTenant() != null && appointment.getTenantId() != null && appointment.getTenantId().equals(user.getTenant().getId())) {
+            return true;
+        }
+        return false;
+    }
+
     @GetMapping("/appointments")
     public ResponseEntity<?> getAppointments() {
         try {
@@ -276,7 +372,104 @@ public class ProviderController {
             User user = userRepository.findByEmail(userDetails.getUsername())
                     .orElseThrow(() -> new RuntimeException("User not found"));
 
-            List<Appointment> appointments = appointmentRepository.findByProviderIdOrderByAppointmentDateDesc(user.getId());
+            List<Appointment> appointments;
+            boolean isAdmin = "admin".equalsIgnoreCase(user.getRole()) 
+                    || "role_admin".equalsIgnoreCase(user.getRole()) 
+                    || "super_admin".equalsIgnoreCase(user.getRole());
+
+            if (isAdmin && user.getTenant() != null) {
+                appointments = appointmentRepository.findByTenantIdOrderByAppointmentDateDesc(user.getTenant().getId());
+            } else {
+                appointments = appointmentRepository.findByProviderIdOrderByAppointmentDateDesc(user.getId());
+            }
+            List<ProviderService> tenantServices = user.getTenant() != null 
+                    ? providerServiceRepository.findByTenantId(user.getTenant().getId()) 
+                    : java.util.Collections.emptyList();
+
+            appointments.forEach(app -> {
+                // Populate patient profile picture
+                userRepository.findByEmailIgnoringTenant(app.getPatientEmail()).ifPresent(u -> {
+                    app.setPatientProfilePicture(u.getProfilePicture());
+                });
+                // Populate doctor info
+                userRepository.findById(app.getProviderId()).ifPresent(p -> {
+                    app.setDoctorName(p.getFullName());
+                    ProviderProfile profile = providerProfileRepository.findByUser(p).orElse(null);
+                    if (profile != null && profile.getProfilePictureUrl() != null && !profile.getProfilePictureUrl().isEmpty()) {
+                        app.setDoctorProfilePicture(profile.getProfilePictureUrl());
+                    } else {
+                        app.setDoctorProfilePicture(p.getProfilePicture());
+                    }
+                    if (profile != null) {
+                        app.setDoctorSpecialty(profile.getPrimarySpecialty());
+                    }
+                });
+                
+                // Tenant details & dynamic customer role
+                String defaultCustomerRole = "client";
+                if (app.getTenantId() != null) {
+                    com.backend.model.Tenant t = tenantRepository.findById(app.getTenantId()).orElse(null);
+                    if (t != null) {
+                        app.setOrganizationType(t.getOrganizationType());
+                        app.setOrganizationName(t.getOrganizationName());
+                        if (t.getOrganizationType() != null) {
+                            String ot = t.getOrganizationType().toLowerCase();
+                            if (ot.contains("college") || ot.contains("univ") || ot.contains("school") || ot.contains("educ")) {
+                                defaultCustomerRole = "student";
+                            } else if (ot.contains("clinic") || ot.contains("hosp") || ot.contains("med")) {
+                                defaultCustomerRole = "patient";
+                            }
+                        }
+                    }
+                }
+
+                // Check if the service allows virtual / online consultations
+                boolean allowsVideo = false;
+                if (app.getServiceName() != null) {
+                    allowsVideo = tenantServices.stream()
+                            .filter(s -> s.getServiceName() != null && s.getServiceName().equalsIgnoreCase(app.getServiceName().trim()))
+                            .anyMatch(s -> Boolean.TRUE.equals(s.getIsTelemedicine()));
+                    if (!allowsVideo && app.getProviderId() != null) {
+                        ProviderProfile pProfile = providerProfileRepository.findByUser(userRepository.findById(app.getProviderId()).orElse(null)).orElse(null);
+                        if (pProfile != null) {
+                            allowsVideo = providerServiceRepository.findByProviderProfile(pProfile).stream()
+                                    .filter(s -> s.getServiceName() != null && s.getServiceName().equalsIgnoreCase(app.getServiceName().trim()))
+                                    .anyMatch(s -> Boolean.TRUE.equals(s.getIsTelemedicine()));
+                        }
+                    }
+                }
+                app.setServiceAllowsVideo(allowsVideo);
+                if (!allowsVideo) {
+                    app.setVideoCallEnabled(false);
+                    if ("VIRTUAL".equalsIgnoreCase(app.getAppointmentType())) {
+                        app.setAppointmentType("IN_PERSON");
+                    }
+                }
+
+                // Display fallbacks for existing records
+                if (app.getBookedByName() == null || app.getBookedByName().isEmpty()) {
+                    app.setBookedByName(app.getPatientName());
+                    app.setBookedByRole(defaultCustomerRole);
+                } else if ("patient".equalsIgnoreCase(app.getBookedByRole()) && "student".equals(defaultCustomerRole)) {
+                    app.setBookedByRole("student");
+                }
+                if (app.getApprovedAt() != null && (app.getApprovedByName() == null || app.getApprovedByName().isEmpty())) {
+                    app.setApprovedByName(app.getDoctorName() != null ? app.getDoctorName() : "Staff");
+                    app.setApprovedByRole("service_provider");
+                }
+                if (app.getCheckedInAt() != null && (app.getCheckedInByName() == null || app.getCheckedInByName().isEmpty())) {
+                    if (app.getCompletedByName() != null) {
+                        app.setCheckedInByName(app.getCompletedByName());
+                        app.setCheckedInByRole(app.getCompletedByRole());
+                    } else if (app.getDoctorName() != null) {
+                        app.setCheckedInByName(app.getDoctorName());
+                        app.setCheckedInByRole("service_provider");
+                    } else {
+                        app.setCheckedInByName("Front Desk Staff");
+                        app.setCheckedInByRole("service_provider");
+                    }
+                }
+            });
 
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
@@ -290,6 +483,17 @@ public class ProviderController {
         }
     }
 
+    @PostMapping("/appointments")
+    public ResponseEntity<?> createAppointment(@RequestBody com.backend.dto.WalkInAppointmentRequest request) {
+        try {
+            UserDetails userDetails = (UserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+            adminService.createWalkInAppointment(request, userDetails.getUsername());
+            return ResponseEntity.ok(Map.of("success", true, "message", "Appointment created successfully"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
     @PutMapping("/appointments/checkin/{transactionId}")
     public ResponseEntity<?> checkInAppointment(@PathVariable String transactionId) {
         try {
@@ -297,25 +501,48 @@ public class ProviderController {
             User user = userRepository.findByEmail(userDetails.getUsername())
                     .orElseThrow(() -> new RuntimeException("User not found"));
 
+            if (!hasCalendarWritePermission(user)) {
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", false);
+                response.put("message", "Access denied. Your role has read-only access to calendar and appointments.");
+                return ResponseEntity.status(403).body(response);
+            }
+
             System.out.println("DEBUG CHECKIN: Received transactionId: " + transactionId);
-            List<Appointment> appointments = appointmentRepository.findByTransactionId(transactionId);
+            List<Appointment> appointments = new java.util.ArrayList<>(appointmentRepository.findByTransactionId(transactionId));
+            if (appointments.isEmpty() && transactionId != null) {
+                String cleanId = transactionId.replace("APPT-", "").trim();
+                if (cleanId.matches("^\\d+$")) {
+                    appointmentRepository.findById(Long.parseLong(cleanId)).ifPresent(appointments::add);
+                }
+            }
             System.out.println("DEBUG CHECKIN: Found appointments: " + appointments.size());
             
             if (appointments.isEmpty()) {
-                System.out.println("DEBUG CHECKIN: No appointments found for transactionId: " + transactionId);
+                System.out.println("DEBUG CHECKIN: No appointments found for token/id: " + transactionId);
                 throw new RuntimeException("Appointment not found");
             }
 
             boolean checkedInAny = false;
             for (Appointment appointment : appointments) {
                 System.out.println("DEBUG CHECKIN: Checking appointment ID: " + appointment.getId() + " Provider ID: " + appointment.getProviderId() + " Logged in User ID: " + user.getId());
-                // Verify that the provider owns this appointment
-                if (appointment.getProviderId().equals(user.getId())) {
+                // Verify provider ownership or tenant staff permission
+                if (canManageAppointment(user, appointment)) {
                     appointment.setAppointmentStatus("CHECKED_IN");
                     appointment.setCheckedInAt(java.time.LocalDateTime.now());
+                    appointment.setCheckedInByName(user.getFullName() != null && !user.getFullName().isEmpty() ? user.getFullName() : user.getEmail());
+                    appointment.setCheckedInByRole(user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole());
+                    appointment.setCheckedInByUserId(user.getId());
                     appointmentRepository.save(appointment);
                     checkedInAny = true;
                     System.out.println("DEBUG CHECKIN: Successfully checked in appointment ID: " + appointment.getId());
+
+                    // Dispatch role-separated check-in notifications
+                    try {
+                        notificationService.notifyAppointmentCheckedIn(appointment);
+                    } catch (Exception notifEx) {
+                        System.err.println("Failed to send checkin notifications: " + notifEx.getMessage());
+                    }
                 }
             }
 
@@ -348,12 +575,22 @@ public class ProviderController {
             Appointment appointment = appointmentRepository.findById(id)
                     .orElseThrow(() -> new RuntimeException("Appointment not found"));
 
-            if (!appointment.getProviderId().equals(user.getId())) {
+            if (!canManageAppointment(user, appointment)) {
                 throw new RuntimeException("Unauthorized to approve this appointment");
+            }
+
+            if (!hasCalendarWritePermission(user)) {
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", false);
+                response.put("message", "Access denied. Your role has read-only access to calendar and appointments.");
+                return ResponseEntity.status(403).body(response);
             }
 
             appointment.setAppointmentStatus("SCHEDULED");
             appointment.setApprovedAt(java.time.LocalDateTime.now());
+            appointment.setApprovedByName(user.getFullName() != null && !user.getFullName().isEmpty() ? user.getFullName() : user.getEmail());
+            appointment.setApprovedByRole(user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole());
+            appointment.setApprovedByUserId(user.getId());
             appointmentRepository.save(appointment);
 
             // Send approval email
@@ -363,19 +600,9 @@ public class ProviderController {
                 e.printStackTrace();
             }
 
-            // Create notification for the patient (user) if they exist
+            // Dispatch role-separated notifications for Approval
             try {
-                userRepository.findByEmail(appointment.getPatientEmail()).ifPresent(patientUser -> {
-                    com.backend.model.Notification notification = com.backend.model.Notification.builder()
-                            .userId(patientUser.getId())
-                            .title("Appointment Approved")
-                            .message("Your appointment for " + appointment.getServiceName() + " has been approved and is now Scheduled.")
-                            .type("APPOINTMENT_APPROVED")
-                            .isRead(false)
-                            .createdAt(java.time.LocalDateTime.now())
-                            .build();
-                    notificationRepository.save(notification);
-                });
+                notificationService.notifyAppointmentApproved(appointment);
             } catch (Exception e) {
                 e.printStackTrace();
             }
@@ -402,16 +629,39 @@ public class ProviderController {
             Appointment appointment = appointmentRepository.findById(id)
                     .orElseThrow(() -> new RuntimeException("Appointment not found"));
 
-            if (!appointment.getProviderId().equals(user.getId())) {
+            if (!canManageAppointment(user, appointment)) {
                 throw new RuntimeException("Unauthorized to decline this appointment");
             }
 
+            if (!hasCalendarWritePermission(user)) {
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", false);
+                response.put("message", "Access denied. Your role has read-only access to calendar and appointments.");
+                return ResponseEntity.status(403).body(response);
+            }
+
             appointment.setAppointmentStatus("CANCELLED");
+            appointment.setCancelledAt(java.time.LocalDateTime.now());
+            appointment.setCancelledByName(user.getFullName() != null && !user.getFullName().isEmpty() ? user.getFullName() : user.getEmail());
+            appointment.setCancelledByRole(user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole());
+            appointment.setCancelledByUserId(user.getId());
             appointmentRepository.save(appointment);
+
+            try {
+                String actorRole = user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole();
+                auditLogService.logAction(user, "Appointment #" + appointment.getId() + " cancelled by " + actorRole + " (" + appointment.getCancelledByName() + ")", "SYSTEM");
+            } catch (Exception ignored) {}
+
+            // Dispatch cancellation notifications
+            try {
+                notificationService.notifyAppointmentCancelled(appointment);
+            } catch (Exception notifEx) {
+                System.err.println("Failed to send cancellation notification: " + notifEx.getMessage());
+            }
 
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
-            response.put("message", "Appointment declined successfully");
+            response.put("message", "Appointment cancelled successfully");
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, Object> response = new HashMap<>();
@@ -421,23 +671,140 @@ public class ProviderController {
         }
     }
 
-    @PutMapping("/appointments/{id}/complete")
-    public ResponseEntity<?> completeAppointment(@PathVariable Long id, @RequestBody Map<String, Object> payload) {
+    @PutMapping("/appointments/{id}/reschedule")
+    public ResponseEntity<?> rescheduleAppointment(
+            @PathVariable Long id, 
+            @RequestParam String newDate, 
+            @RequestParam String newTime) {
         try {
-            UserDetails userDetails = (UserDetails) 
-SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+            UserDetails userDetails = (UserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
             User user = userRepository.findByEmail(userDetails.getUsername())
                     .orElseThrow(() -> new RuntimeException("User not found"));
 
             Appointment appointment = appointmentRepository.findById(id)
                     .orElseThrow(() -> new RuntimeException("Appointment not found"));
 
-            if (!appointment.getProviderId().equals(user.getId())) {
+            if (!canManageAppointment(user, appointment)) {
+                throw new RuntimeException("Unauthorized to reschedule this appointment");
+            }
+
+            if (!hasCalendarWritePermission(user)) {
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", false);
+                response.put("message", "Access denied. Your role has read-only access to calendar and appointments.");
+                return ResponseEntity.status(403).body(response);
+            }
+
+            java.time.LocalDate parsedDate = java.time.LocalDate.parse(newDate);
+            java.time.LocalTime parsedTime = java.time.LocalTime.parse(newTime);
+
+            appointment.setAppointmentDate(parsedDate);
+            appointment.setAppointmentTime(parsedTime);
+            appointment.setAppointmentStatus("SCHEDULED");
+            appointmentRepository.save(appointment);
+
+            try {
+                notificationService.notifyAppointmentRescheduled(appointment, parsedDate, parsedTime);
+            } catch (Exception ex) {
+                System.err.println("Failed to dispatch reschedule notification: " + ex.getMessage());
+            }
+
+            try {
+                String actorRole = user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole();
+                String actorName = user.getFullName() != null && !user.getFullName().isEmpty() ? user.getFullName() : user.getEmail();
+                auditLogService.logAction(user, "Appointment #" + appointment.getId() + " rescheduled to " + newDate + " " + newTime + " by " + actorRole + " (" + actorName + ")", "SYSTEM");
+            } catch (Exception ignored) {}
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Appointment rescheduled successfully");
+            response.put("appointment", appointment);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", false);
+            response.put("message", "Error rescheduling appointment: " + e.getMessage());
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
+
+    @PutMapping("/appointments/{id}/no-show")
+    public ResponseEntity<?> markNoShowAppointment(
+            @PathVariable Long id, 
+            @RequestBody(required = false) Map<String, Object> payload) {
+        try {
+            UserDetails userDetails = (UserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+            User user = userRepository.findByEmail(userDetails.getUsername())
+                    .orElseThrow(() -> new RuntimeException("User not found"));
+
+            Appointment appointment = appointmentRepository.findById(id)
+                    .orElseThrow(() -> new RuntimeException("Appointment not found"));
+
+            if (!canManageAppointment(user, appointment)) {
+                throw new RuntimeException("Unauthorized to update this appointment");
+            }
+
+            if (!hasCalendarWritePermission(user)) {
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", false);
+                response.put("message", "Access denied. Your role has read-only access to calendar and appointments.");
+                return ResponseEntity.status(403).body(response);
+            }
+
+            appointment.setAppointmentStatus("NO_SHOW");
+            appointment.setCancelledAt(java.time.LocalDateTime.now());
+            appointment.setCancelledByName(user.getFullName() != null && !user.getFullName().isEmpty() ? user.getFullName() : user.getEmail());
+            appointment.setCancelledByRole(user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole());
+            appointment.setCancelledByUserId(user.getId());
+            if (payload != null && payload.containsKey("internalNotes")) {
+                appointment.setInternalNotes((String) payload.get("internalNotes"));
+            }
+            appointmentRepository.save(appointment);
+
+            try {
+                String actorRole = user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole();
+                auditLogService.logAction(user, "Appointment #" + appointment.getId() + " marked NO-SHOW by " + actorRole + " (" + appointment.getCancelledByName() + ")", "SYSTEM");
+            } catch (Exception ignored) {}
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Appointment marked as No-Show successfully");
+            response.put("appointment", appointment);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", false);
+            response.put("message", "Error marking appointment as no-show: " + e.getMessage());
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
+
+    @PutMapping("/appointments/{id}/complete")
+    public ResponseEntity<?> completeAppointment(@PathVariable Long id, @RequestBody Map<String, Object> payload) {
+        try {
+            UserDetails userDetails = (UserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+            User user = userRepository.findByEmail(userDetails.getUsername())
+                    .orElseThrow(() -> new RuntimeException("User not found"));
+
+            Appointment appointment = appointmentRepository.findById(id)
+                    .orElseThrow(() -> new RuntimeException("Appointment not found"));
+
+            if (!canManageAppointment(user, appointment)) {
                 throw new RuntimeException("Unauthorized to complete this appointment");
+            }
+
+            if (!hasCalendarWritePermission(user)) {
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", false);
+                response.put("message", "Access denied. Your role has read-only access to calendar and appointments.");
+                return ResponseEntity.status(403).body(response);
             }
 
             appointment.setAppointmentStatus("COMPLETED");
             appointment.setCompletedAt(java.time.LocalDateTime.now());
+            appointment.setCompletedByName(user.getFullName() != null && !user.getFullName().isEmpty() ? user.getFullName() : user.getEmail());
+            appointment.setCompletedByRole(user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole());
+            appointment.setCompletedByUserId(user.getId());
             
             if (payload.containsKey("treatmentSummary")) {
                 appointment.setTreatmentSummary((String) payload.get("treatmentSummary"));
@@ -456,7 +823,6 @@ SecurityContextHolder.getContext().getAuthentication().getPrincipal();
                     java.time.LocalDate followUpDate = java.time.LocalDate.now().plusMonths(months);
                     appointment.setFollowUpDate(followUpDate);
                     
-                    // Create a reminder for 1 week before the followUpDate (which is roughly ~3 months minus 7 days)
                     com.backend.model.Reminder reminder = com.backend.model.Reminder.builder()
                         .providerId(user.getId())
                         .patientName(appointment.getPatientName())
@@ -471,6 +837,18 @@ SecurityContextHolder.getContext().getAuthentication().getPrincipal();
             }
 
             appointmentRepository.save(appointment);
+
+            // Dispatch completion notifications
+            try {
+                notificationService.notifyAppointmentCompleted(appointment);
+            } catch (Exception notifEx) {
+                System.err.println("Failed to dispatch completion notification: " + notifEx.getMessage());
+            }
+
+            try {
+                String actorRole = user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole();
+                auditLogService.logAction(user, "Appointment #" + appointment.getId() + " marked COMPLETED by " + actorRole + " (" + appointment.getCompletedByName() + ")", "SYSTEM");
+            } catch (Exception ignored) {}
 
             // Send feedback email
             if (appointment.getPatientEmail() != null) {
@@ -494,6 +872,98 @@ SecurityContextHolder.getContext().getAuthentication().getPrincipal();
         }
     }
 
+    @PutMapping("/appointments/{id}/toggle-video")
+    public ResponseEntity<?> toggleVideoCall(@PathVariable Long id, @RequestBody(required = false) Map<String, Object> payload) {
+        try {
+            UserDetails userDetails = (UserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+            User user = userRepository.findByEmail(userDetails.getUsername())
+                    .orElseThrow(() -> new RuntimeException("User not found"));
+
+            Appointment appointment = appointmentRepository.findById(id)
+                    .orElseThrow(() -> new RuntimeException("Appointment not found"));
+
+            if (!canManageAppointment(user, appointment)) {
+                throw new RuntimeException("Unauthorized to manage this appointment's video call");
+            }
+
+            if (!hasCalendarWritePermission(user)) {
+                Map<String, Object> response = new HashMap<>();
+                response.put("success", false);
+                response.put("message", "Access denied. Your role has read-only access to calendar and appointments.");
+                return ResponseEntity.status(403).body(response);
+            }
+
+            boolean newState;
+            if (payload != null && payload.containsKey("enabled")) {
+                newState = Boolean.parseBoolean(payload.get("enabled").toString());
+            } else {
+                newState = !Boolean.TRUE.equals(appointment.getVideoCallEnabled());
+            }
+
+            if (newState) {
+                // Verify service allows virtual / video consultation
+                boolean serviceAllowsVirtual = false;
+                if (appointment.getTenantId() != null && appointment.getServiceName() != null) {
+                    List<ProviderService> services = providerServiceRepository.findByTenantId(appointment.getTenantId());
+                    serviceAllowsVirtual = services.stream()
+                            .filter(s -> s.getServiceName() != null && s.getServiceName().equalsIgnoreCase(appointment.getServiceName().trim()))
+                            .anyMatch(s -> Boolean.TRUE.equals(s.getIsTelemedicine()));
+                }
+                if (!serviceAllowsVirtual && appointment.getProviderId() != null && appointment.getServiceName() != null) {
+                    ProviderProfile profile = providerProfileRepository.findByUser(userRepository.findById(appointment.getProviderId()).orElse(null)).orElse(null);
+                    if (profile != null) {
+                        serviceAllowsVirtual = providerServiceRepository.findByProviderProfile(profile).stream()
+                                .filter(s -> s.getServiceName() != null && s.getServiceName().equalsIgnoreCase(appointment.getServiceName().trim()))
+                                .anyMatch(s -> Boolean.TRUE.equals(s.getIsTelemedicine()));
+                    }
+                }
+
+                if (!serviceAllowsVirtual) {
+                    Map<String, Object> response = new HashMap<>();
+                    response.put("success", false);
+                    response.put("message", "Video call cannot be enabled because the service '" 
+                            + (appointment.getServiceName() != null ? appointment.getServiceName() : "selected") 
+                            + "' does not have virtual/online enabled.");
+                    return ResponseEntity.badRequest().body(response);
+                }
+            }
+
+            appointment.setVideoCallEnabled(newState);
+            if (newState) {
+                appointment.setAppointmentType("VIRTUAL");
+                if (appointment.getMeetingLink() == null || appointment.getMeetingLink().isBlank()) {
+                    String roomName = "OmniBook-Tenant" + (appointment.getTenantId() != null ? appointment.getTenantId() : "0") 
+                            + "-Appt" + appointment.getId() + "-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+                    appointment.setMeetingLink("https://meet.jit.si/" + roomName);
+                }
+            } else {
+                appointment.setAppointmentType("IN_PERSON");
+            }
+
+            appointmentRepository.save(appointment);
+
+            // Dispatch notification when video call is toggled
+            try {
+                notificationService.notifyVideoCallToggled(appointment, user.getFullName(), newState);
+            } catch (Exception notifEx) {
+                System.err.println("Failed to dispatch video notification: " + notifEx.getMessage());
+            }
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", newState ? "Video call enabled successfully" : "Video call disabled");
+            response.put("videoCallEnabled", appointment.getVideoCallEnabled());
+            response.put("meetingLink", appointment.getMeetingLink());
+            response.put("appointmentType", appointment.getAppointmentType());
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", false);
+            response.put("message", "Error toggling video call: " + e.getMessage());
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
+
     @GetMapping("/patients")
     public ResponseEntity<?> getPatientsForProvider() {
         try {
@@ -501,7 +971,19 @@ SecurityContextHolder.getContext().getAuthentication().getPrincipal();
             User provider = userRepository.findByEmail(userDetails.getUsername())
                     .orElseThrow(() -> new RuntimeException("Provider not found"));
 
-            List<Appointment> allAppointments = appointmentRepository.findByProviderIdOrderByAppointmentDateDesc(provider.getId());
+            List<Appointment> allAppointments;
+            boolean isAdmin = "admin".equalsIgnoreCase(provider.getRole()) 
+                    || "role_admin".equalsIgnoreCase(provider.getRole()) 
+                    || "super_admin".equalsIgnoreCase(provider.getRole());
+
+            if (isAdmin && provider.getTenant() != null) {
+                allAppointments = appointmentRepository.findByTenantIdOrderByAppointmentDateDesc(provider.getTenant().getId());
+            } else {
+                allAppointments = appointmentRepository.findByProviderIdOrderByAppointmentDateDesc(provider.getId())
+                        .stream()
+                        .filter(a -> a.getProviderId() != null && a.getProviderId().equals(provider.getId()))
+                        .collect(java.util.stream.Collectors.toList());
+            }
 
             // Group by email
             java.util.Map<String, List<Appointment>> groupedByEmail = allAppointments.stream()
@@ -516,7 +998,7 @@ SecurityContextHolder.getContext().getAuthentication().getPrincipal();
                 List<Appointment> appts = entry.getValue();
 
                 int totalBookings = appts.size();
-                long noShows = appts.stream().filter(a -> "CANCELLED".equals(a.getAppointmentStatus())).count();
+                long noShows = appts.stream().filter(a -> "CANCELLED".equals(a.getAppointmentStatus()) || "NO_SHOW".equals(a.getAppointmentStatus())).count();
                 
                 appts.sort((a,b) -> b.getAppointmentDate().compareTo(a.getAppointmentDate()));
                 Appointment lastVisit = appts.get(0);
@@ -556,6 +1038,23 @@ SecurityContextHolder.getContext().getAuthentication().getPrincipal();
             Map<String, Object> response = new HashMap<>();
             response.put("success", false);
             response.put("message", "Error fetching patient directory: " + e.getMessage());
+            return ResponseEntity.badRequest().body(response);
+        }
+    }
+
+    @GetMapping("/analytics")
+    public ResponseEntity<?> getAnalytics(@RequestParam(value = "range", defaultValue = "Last 30 Days") String range) {
+        try {
+            UserDetails userDetails = (UserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+            User provider = userRepository.findByEmail(userDetails.getUsername())
+                    .orElseThrow(() -> new RuntimeException("Provider not found"));
+
+            com.backend.dto.ProviderAnalyticsDTO analytics = providerAnalyticsService.getProviderAnalytics(provider, range);
+            return ResponseEntity.ok(analytics);
+        } catch (Exception e) {
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", false);
+            response.put("message", "Error calculating analytics: " + e.getMessage());
             return ResponseEntity.badRequest().body(response);
         }
     }

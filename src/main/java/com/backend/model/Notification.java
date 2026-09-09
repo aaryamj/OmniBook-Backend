@@ -22,13 +22,19 @@ public class Notification {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    private Long userId; // Recipient of the notification
+    private Long userId; // Recipient of the notification (null if role-broadcast)
+
+    private String targetRole; // e.g. SUPER_ADMIN, ADMIN, SERVICE_PROVIDER, USER
+
+    private Long tenantId; // Organization / Tenant ID (null for platform SuperAdmin)
 
     private String title;
     
     private String message;
     
-    private String type; // e.g. TENANT_REGISTER, TENANT_APPROVE, AUTH_LOGIN
+    private String type; // e.g. BOOKING, APPROVED, CHECKED_IN, COMPLETED, CANCELLED, RESCHEDULED, PAYMENT, TENANT_REGISTER, EMERGENCY_STOP
+    
+    private String link; // Frontend direct route link
     
     private boolean isRead;
     

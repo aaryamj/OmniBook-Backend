@@ -10,6 +10,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -20,6 +21,7 @@ public class AdminDepartmentService {
 
     private final DepartmentRepository departmentRepository;
     private final UserRepository userRepository;
+    private final com.backend.repository.ProviderProfileRepository providerProfileRepository;
 
     private User getAdminUser(String adminEmail) {
         User admin = userRepository.findByEmail(adminEmail)
@@ -42,6 +44,8 @@ public class AdminDepartmentService {
         
         Department department = Department.builder()
                 .name(request.getName())
+                .code(request.getCode())
+                .headName(request.getHeadName())
                 .description(request.getDescription())
                 .isActive(request.getIsActive() != null ? request.getIsActive() : true)
                 .tenant(admin.getTenant())
@@ -59,6 +63,8 @@ public class AdminDepartmentService {
                 .orElseThrow(() -> new RuntimeException("Department not found"));
                 
         if (request.getName() != null) department.setName(request.getName());
+        if (request.getCode() != null) department.setCode(request.getCode());
+        if (request.getHeadName() != null) department.setHeadName(request.getHeadName());
         if (request.getDescription() != null) department.setDescription(request.getDescription());
         if (request.getIsActive() != null) department.setActive(request.getIsActive());
         
@@ -78,11 +84,28 @@ public class AdminDepartmentService {
     }
 
     private DepartmentDTO mapToDTO(Department department) {
+        Long tenantId = department.getTenant() != null ? department.getTenant().getId() : null;
+        List<String> approved = new ArrayList<>();
+        if (tenantId != null) {
+            approved = providerProfileRepository.findByTenantId(tenantId).stream()
+                    .filter(p -> p.getStatus() == com.backend.model.ProviderStatus.ACTIVE)
+                    .filter(p -> p.getPrimarySpecialty() != null &&
+                            (p.getPrimarySpecialty().trim().equalsIgnoreCase(department.getName().trim()) ||
+                             (department.getCode() != null && !department.getCode().isBlank() && p.getPrimarySpecialty().trim().equalsIgnoreCase(department.getCode().trim()))))
+                    .map(p -> p.getUser() != null ? p.getUser().getFullName() : null)
+                    .filter(name -> name != null && !name.isBlank())
+                    .distinct()
+                    .collect(Collectors.toList());
+        }
+
         return DepartmentDTO.builder()
                 .id(department.getId())
                 .name(department.getName())
+                .code(department.getCode())
+                .headName(department.getHeadName())
                 .description(department.getDescription())
                 .isActive(department.isActive())
+                .approvedProviders(approved)
                 .createdAt(department.getCreatedAt())
                 .updatedAt(department.getUpdatedAt())
                 .build();

@@ -20,5 +20,16 @@ public class TimeSlotDTO {
     private String providerId;
     
     private Boolean isBreak;
+    private Boolean isPast;
+    private Boolean isBooked; // true if already booked by an existing appointment ("Sold Out")
+    private Boolean isCompleted; // true if already completed by the provider
+    private String slotStatus; // e.g. "COMPLETED", "SCHEDULED", "CHECKED_IN", "APPROVED"
+    private String slotTime24; // "HH:mm" 24-hour format e.g. "10:30"
     private String providerImageUrl;
+
+    private Integer maxCapacity;
+    private Integer currentBookings;
+    private Integer availableSeats;
+    private Boolean isFull;
+    private Boolean alreadyBookedByUser;
 }

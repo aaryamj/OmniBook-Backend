@@ -11,4 +11,5 @@ import java.util.Optional;
 public interface UserSessionRepository extends JpaRepository<UserSession, Long> {
     List<UserSession> findByUserIdOrderByLoginAtDesc(Long userId);
     Optional<UserSession> findByToken(String token);
+    void deleteByToken(String token);
 }

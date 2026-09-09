@@ -28,4 +28,9 @@ public class AdminDashboardStatsDTO {
     private List<LivePatientFlowDTO> livePatientFlow;
     private List<Integer> weeklyAppointments; // length 7 (Mon-Sun)
     private List<ProviderStatusDTO> providerMatrix;
+
+    // Branding & Organization
+    private String primaryAccentColor;
+    private String organizationName;
+    private String organizationType;
 }

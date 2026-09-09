@@ -48,6 +48,8 @@ public class Appointment {
     
     private String meetingLink; // URL for telehealth
 
+    private Boolean videoCallEnabled; // Whether provider enabled virtual video consultation
+
     private String serviceName;
 
     private Double price;
@@ -82,9 +84,50 @@ public class Appointment {
     private String patientReview;
 
     private LocalDateTime bookedAt;
+    private String bookedByName;
+    private String bookedByRole;
+    private Long bookedByUserId;
+
     private LocalDateTime approvedAt;
+    private String approvedByName;
+    private String approvedByRole;
+    private Long approvedByUserId;
+
     private LocalDateTime checkedInAt;
+    private String checkedInByName;
+    private String checkedInByRole;
+    private Long checkedInByUserId;
+
     private LocalDateTime completedAt;
+    private String completedByName;
+    private String completedByRole;
+    private Long completedByUserId;
+
+    private String cancelledByName;
+    private String cancelledByRole;
+    private Long cancelledByUserId;
+    private LocalDateTime cancelledAt;
+
+    @Transient
+    private String patientProfilePicture;
+
+    @Transient
+    private String doctorProfilePicture;
+
+    @Transient
+    private String doctorName;
+
+    @Transient
+    private String doctorSpecialty;
+    
+    @Transient
+    private String organizationType;
+
+    @Transient
+    private String organizationName;
+
+    @Transient
+    private Boolean serviceAllowsVideo;
     
     @PrePersist
     protected void onCreate() {

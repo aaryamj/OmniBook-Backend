@@ -22,6 +22,7 @@ public class SuperadminController {
     private final AuditLogService auditLogService;
     private final SystemKPIService systemKPIService;
     private final com.backend.service.FinancialReportService financialReportService;
+    private final com.backend.service.SupportTicketService supportTicketService;
 
     @PostMapping("/tenants")
     public ResponseEntity<String> onboardClinic(@RequestBody OnboardClinicRequest request) {
@@ -81,8 +82,9 @@ public class SuperadminController {
     }
 
     @GetMapping("/system-kpi")
-    public ResponseEntity<SystemKPIDTO> getSystemKPIs() {
-        return ResponseEntity.ok(systemKPIService.getCurrentKPIs());
+    public ResponseEntity<SystemKPIDTO> getSystemKPIs(
+            @RequestParam(required = false, defaultValue = "Real-Time (Live)") String timeRange) {
+        return ResponseEntity.ok(systemKPIService.getCurrentKPIs(timeRange));
     }
 
     @GetMapping("/reports/financial")
@@ -106,4 +108,59 @@ public class SuperadminController {
         
         return new ResponseEntity<>(data, headers, org.springframework.http.HttpStatus.OK);
     }
+
+    @GetMapping("/support/tickets")
+    public ResponseEntity<java.util.List<com.backend.dto.SupportTicketResponseDTO>> getSupportTickets(
+            @RequestParam(required = false) String timeFilter,
+            @RequestParam(required = false) String issueType) {
+        return ResponseEntity.ok(supportTicketService.getTickets(timeFilter, issueType));
+    }
+
+    @GetMapping("/support/kpis")
+    public ResponseEntity<com.backend.dto.SupportKPIDTO> getSupportKPIs(
+            @RequestParam(required = false) String timeFilter) {
+        return ResponseEntity.ok(supportTicketService.getSupportKPIs(timeFilter));
+    }
+
+    @PatchMapping("/support/tickets/{id}/status")
+    public ResponseEntity<com.backend.dto.SupportTicketResponseDTO> updateTicketStatus(
+            @PathVariable Long id,
+            @RequestBody java.util.Map<String, String> payload) {
+        String newStatus = payload.get("status");
+        if (newStatus == null || newStatus.isBlank()) {
+            return ResponseEntity.badRequest().build();
+        }
+        return ResponseEntity.ok(supportTicketService.updateTicketStatus(id, newStatus));
+    }
+
+    @PostMapping("/support/announcements")
+    public ResponseEntity<com.backend.model.SystemAnnouncement> createAnnouncement(
+            @jakarta.validation.Valid @RequestBody com.backend.dto.AnnouncementRequestDTO request,
+            java.security.Principal principal) {
+        String createdBy = (principal != null) ? principal.getName() : "System Admin";
+        return ResponseEntity.ok(supportTicketService.createAnnouncement(request, createdBy));
+    }
+
+    @GetMapping("/support/announcements")
+    public ResponseEntity<java.util.List<com.backend.model.SystemAnnouncement>> getAnnouncements() {
+        return ResponseEntity.ok(supportTicketService.getAllAnnouncements());
+    }
+
+    @GetMapping("/rbac")
+    public ResponseEntity<com.backend.dto.SuperadminRBACDTO> getRBAC() {
+        return ResponseEntity.ok(superadminService.getRBACData());
+    }
+
+    @PostMapping("/rbac/roles")
+    public ResponseEntity<com.backend.dto.SuperadminRBACDTO.TenantRoleItemDTO> createRole(
+            @jakarta.validation.Valid @RequestBody com.backend.dto.SuperadminCreateRoleRequestDTO request) {
+        return ResponseEntity.ok(superadminService.createSuperadminCustomRole(request));
+    }
+
+    @GetMapping("/search")
+    public ResponseEntity<java.util.List<com.backend.dto.GlobalSearchResultDTO>> globalSearch(
+            @RequestParam(name = "q", defaultValue = "") String query) {
+        return ResponseEntity.ok(superadminService.globalSearch(query));
+    }
 }
+

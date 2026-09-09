@@ -9,12 +9,15 @@ import com.backend.repository.ProviderProfileRepository;
 import com.backend.repository.UserRepository;
 import com.backend.repository.UserSettingsRepository;
 import com.backend.repository.UserSessionRepository;
+import com.backend.repository.TenantRepository;
+import com.backend.model.Tenant;
 import com.backend.model.UserSession;
 import com.backend.dto.UserSessionDto;
 import com.backend.dto.UserProfileDto;
 import com.backend.dto.PasswordUpdateDto;
 import com.backend.dto.SocialLoginDto;
 import com.backend.service.SocialLoginService;
+import com.backend.service.FileStorageService;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -22,6 +25,9 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
+import java.time.LocalDateTime;
 
 import java.util.HashMap;
 import java.util.List;
@@ -38,9 +44,41 @@ public class UserController {
     private final UserRepository userRepository;
     private final ProviderProfileRepository providerProfileRepository;
     private final UserSettingsRepository userSettingsRepository;
+    private final TenantRepository tenantRepository;
     private final PasswordEncoder passwordEncoder;
     private final SocialLoginService socialLoginService;
     private final UserSessionRepository userSessionRepository;
+    private final FileStorageService fileStorageService;
+
+    @GetMapping("/me")
+    public ResponseEntity<?> getCurrentUser() {
+        try {
+            UserDetails userDetails = (UserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+            User user = userRepository.findByEmail(userDetails.getUsername())
+                    .orElseThrow(() -> new RuntimeException("User not found"));
+
+            Map<String, Object> resp = new HashMap<>();
+            resp.put("id", user.getId());
+            resp.put("fullName", user.getFullName());
+            resp.put("email", user.getEmail());
+            resp.put("phone", user.getPhone());
+            resp.put("role", user.getRole());
+            resp.put("tenantId", user.getTenant() != null ? user.getTenant().getId() : null);
+            if (user.getTenantRole() != null) {
+                resp.put("tenantRoleId", user.getTenantRole().getId());
+                resp.put("tenantRoleName", user.getTenantRole().getRoleName());
+                resp.put("accessScope", user.getTenantRole().getAccessScope());
+                resp.put("privilegeLevel", user.getTenantRole().getPrivilegeLevel());
+                resp.put("permissionsJson", user.getTenantRole().getPermissionsJson());
+            }
+            return ResponseEntity.ok(resp);
+        } catch (Exception e) {
+            Map<String, Object> resp = new HashMap<>();
+            resp.put("success", false);
+            resp.put("message", "Error fetching user info: " + e.getMessage());
+            return ResponseEntity.badRequest().body(resp);
+        }
+    }
 
     @GetMapping("/appointments")
     public ResponseEntity<?> getUserAppointments() {
@@ -49,7 +87,39 @@ public class UserController {
             User user = userRepository.findByEmail(userDetails.getUsername())
                     .orElseThrow(() -> new RuntimeException("User not found"));
 
-            List<Appointment> appointments = appointmentRepository.findByPatientEmailOrderByAppointmentDateDesc(user.getEmail());
+            String userEmail = user.getEmail() != null ? user.getEmail().trim().toLowerCase() : "";
+            Long userId = user.getId();
+            String userPhone = user.getPhone() != null ? user.getPhone().trim() : "";
+
+            List<Appointment> appointments = appointmentRepository.findAll().stream()
+                    .filter(app -> {
+                        // 1. If booked by this user account, it is strictly theirs
+                        if (app.getBookedByUserId() != null && app.getBookedByUserId().equals(userId)) {
+                            return true;
+                        }
+                        // 2. If patient email matches AND it wasn't booked by a different registered user account
+                        if (app.getPatientEmail() != null && !app.getPatientEmail().isBlank() 
+                                && app.getPatientEmail().trim().equalsIgnoreCase(userEmail)) {
+                            return app.getBookedByUserId() == null || app.getBookedByUserId().equals(userId);
+                        }
+                        // 3. If phone matches for guest bookings
+                        if (!userPhone.isBlank() && app.getPatientPhone() != null 
+                                && app.getPatientPhone().trim().equals(userPhone)) {
+                            return app.getBookedByUserId() == null || app.getBookedByUserId().equals(userId);
+                        }
+                        return false;
+                    })
+                    .sorted((a, b) -> {
+                        if (a.getAppointmentDate() != null && b.getAppointmentDate() != null) {
+                            int cmp = b.getAppointmentDate().compareTo(a.getAppointmentDate());
+                            if (cmp != 0) return cmp;
+                        }
+                        if (a.getAppointmentTime() != null && b.getAppointmentTime() != null) {
+                            return b.getAppointmentTime().compareTo(a.getAppointmentTime());
+                        }
+                        return 0;
+                    })
+                    .collect(Collectors.toList());
 
             List<Map<String, Object>> responseList = appointments.stream().map(app -> {
                 Map<String, Object> map = new HashMap<>();
@@ -60,20 +130,108 @@ public class UserController {
                 map.put("appointmentStatus", app.getAppointmentStatus());
                 map.put("reasonForVisit", app.getReasonForVisit());
                 map.put("price", app.getPrice());
-                map.put("transactionId", app.getTransactionId());
+                String txId = app.getTransactionId();
+                if (txId == null || txId.isBlank()) {
+                    txId = "TXN-" + java.util.UUID.randomUUID().toString();
+                    app.setTransactionId(txId);
+                    appointmentRepository.save(app);
+                }
+                map.put("transactionId", txId);
                 map.put("appointmentType", app.getAppointmentType());
                 map.put("meetingLink", app.getMeetingLink());
-                
-                // get doctor info
-                User provider = userRepository.findById(app.getProviderId()).orElse(null);
-                if (provider != null) {
-                    map.put("doctorName", provider.getFullName());
-                    ProviderProfile profile = providerProfileRepository.findByUser(provider).orElse(null);
-                    if (profile != null) {
-                        map.put("doctorProfilePicture", profile.getProfilePictureUrl());
-                        map.put("doctorSpecialty", profile.getPrimarySpecialty());
+                map.put("videoCallEnabled", Boolean.TRUE.equals(app.getVideoCallEnabled()) || "VIRTUAL".equalsIgnoreCase(app.getAppointmentType()));
+
+                // Tenant details
+                map.put("tenantId", app.getTenantId());
+                Tenant appTenant = null;
+                if (app.getTenantId() != null) {
+                    appTenant = tenantRepository.findById(app.getTenantId()).orElse(null);
+                    if (appTenant != null) {
+                        map.put("organizationType", appTenant.getOrganizationType());
+                        map.put("organizationName", appTenant.getOrganizationName());
+                        map.put("organizationLogo", appTenant.getLogoUrl());
+                        map.put("organizationAddress", appTenant.getAddress());
+                        map.put("organizationPhone", appTenant.getPhoneContact());
+                        map.put("primaryAccentColor", appTenant.getPrimaryAccentColor());
                     }
                 }
+                
+                boolean isClinic = appTenant != null && "Clinic".equalsIgnoreCase(appTenant.getOrganizationType());
+
+                // get doctor / provider info
+                User provider = app.getProviderId() != null ? userRepository.findById(app.getProviderId()).orElse(null) : null;
+                String docName = null;
+                String docPic = null;
+                String docSpecialty = null;
+                if (provider != null) {
+                    String pFullName = provider.getFullName() != null ? provider.getFullName() : "Unknown";
+                    String prefix = (isClinic && !pFullName.toLowerCase().startsWith("dr.") ? "Dr. " : "");
+                    docName = prefix + pFullName;
+                    map.put("doctorName", docName);
+                    ProviderProfile profile = providerProfileRepository.findByUser(provider).orElse(null);
+                    if (profile != null && profile.getProfilePictureUrl() != null && !profile.getProfilePictureUrl().trim().isEmpty()) {
+                        docPic = profile.getProfilePictureUrl();
+                    } else if (provider.getProfilePicture() != null && !provider.getProfilePicture().trim().isEmpty()) {
+                        docPic = provider.getProfilePicture();
+                    }
+                    map.put("doctorProfilePicture", docPic);
+                    if (profile != null && profile.getPrimarySpecialty() != null) {
+                        docSpecialty = profile.getPrimarySpecialty();
+                    } else if (provider.getSpecialization() != null) {
+                        docSpecialty = provider.getSpecialization();
+                    } else {
+                        docSpecialty = app.getServiceName();
+                    }
+                    map.put("doctorSpecialty", docSpecialty);
+                }
+
+                // Patient details
+                map.put("patientName", app.getPatientName());
+                map.put("patientPhone", app.getPatientPhone());
+                map.put("patientEmail", app.getPatientEmail());
+                map.put("patientProfilePicture", user.getProfilePicture());
+
+                // Notes & Feedback
+                map.put("treatmentSummary", app.getTreatmentSummary());
+                map.put("internalNotes", app.getInternalNotes());
+                map.put("followUpDate", app.getFollowUpDate());
+                map.put("feedbackToken", app.getFeedbackToken());
+                map.put("patientRating", app.getPatientRating());
+                map.put("patientReview", app.getPatientReview());
+
+                // Lifecycle Timestamps & Attribution
+                map.put("bookedAt", app.getBookedAt());
+                map.put("bookedByName", app.getBookedByName() != null && !app.getBookedByName().isEmpty() ? app.getBookedByName() : app.getPatientName());
+                map.put("bookedByRole", app.getBookedByRole() != null && !app.getBookedByRole().isEmpty() ? app.getBookedByRole() : "patient");
+
+                map.put("approvedAt", app.getApprovedAt());
+                String approvedBy = app.getApprovedByName();
+                String approvedRole = app.getApprovedByRole();
+                if (app.getApprovedAt() != null && (approvedBy == null || approvedBy.isEmpty())) {
+                    approvedBy = docName != null ? docName : "Staff";
+                    approvedRole = "service_provider";
+                }
+                map.put("approvedByName", approvedBy);
+                map.put("approvedByRole", approvedRole);
+
+                map.put("checkedInAt", app.getCheckedInAt());
+                String checkedInBy = app.getCheckedInByName();
+                String checkedInRole = app.getCheckedInByRole();
+                if (app.getCheckedInAt() != null && (checkedInBy == null || checkedInBy.isEmpty())) {
+                    checkedInBy = app.getCompletedByName() != null ? app.getCompletedByName() : (docName != null ? docName : "Front Desk Staff");
+                    checkedInRole = "service_provider";
+                }
+                map.put("checkedInByName", checkedInBy);
+                map.put("checkedInByRole", checkedInRole);
+
+                map.put("completedAt", app.getCompletedAt());
+                map.put("completedByName", app.getCompletedByName());
+                map.put("completedByRole", app.getCompletedByRole() != null ? app.getCompletedByRole() : "service_provider");
+
+                map.put("cancelledAt", app.getCancelledAt());
+                map.put("cancelledByName", app.getCancelledByName());
+                map.put("cancelledByRole", app.getCancelledByRole());
+
                 return map;
             }).collect(Collectors.toList());
 
@@ -102,8 +260,49 @@ public class UserController {
             dto.setFullName(user.getFullName());
             dto.setEmail(user.getEmail());
             dto.setPhone(user.getPhone());
-            dto.setCountry(settings.getCountry() != null ? settings.getCountry() : "+1");
-            dto.setProfilePicture(user.getProfilePicture());
+            
+            String country = settings.getCountry();
+            if (country == null || country.isBlank()) {
+                String phone = user.getPhone() != null ? user.getPhone().trim() : "";
+                if (phone.startsWith("+977") || phone.startsWith("977")) {
+                    country = "+977";
+                } else if (phone.length() == 10 && (phone.startsWith("98") || phone.startsWith("97"))) {
+                    country = "+977"; // Standard Nepali mobile number format
+                } else if (phone.startsWith("+91")) {
+                    country = "+91";
+                } else if (phone.startsWith("+44")) {
+                    country = "+44";
+                } else if (phone.startsWith("+61")) {
+                    country = "+61";
+                } else if (phone.startsWith("+1")) {
+                    country = "+1";
+                } else {
+                    country = "+977"; // Default for Nepal / South Asia deployment
+                }
+            }
+            dto.setCountry(country);
+            dto.setRole(user.getRole());
+            
+            String profilePic = user.getProfilePicture();
+            if (user.getTenant() != null) {
+                dto.setOrganizationName(user.getTenant().getOrganizationName());
+                dto.setOrganizationType(user.getTenant().getOrganizationType());
+                dto.setLogoUrl(user.getTenant().getLogoUrl());
+                if ((profilePic == null || profilePic.isBlank()) && "admin".equalsIgnoreCase(user.getRole()) && user.getTenant().getLogoUrl() != null) {
+                    profilePic = user.getTenant().getLogoUrl();
+                }
+
+                // Add tenant admin details
+                java.util.List<User> admins = userRepository.findByTenantIdAndRole(user.getTenant().getId(), "admin");
+                if (!admins.isEmpty()) {
+                    dto.setTenantAdminName(admins.get(0).getFullName());
+                    dto.setTenantAdminEmail(admins.get(0).getEmail());
+                } else if ("admin".equalsIgnoreCase(user.getRole())) {
+                    dto.setTenantAdminName(user.getFullName());
+                    dto.setTenantAdminEmail(user.getEmail());
+                }
+            }
+            dto.setProfilePicture(profilePic);
             dto.setTwoStepEnabled(settings.isTwoStepEnabled());
             dto.setUpdatedAt(user.getUpdatedAt());
             
@@ -183,20 +382,27 @@ public class UserController {
             }
             
             // Patient Profile Fields
-            if (dto.getDateOfBirth() != null) {
-                user.setDateOfBirth(java.time.LocalDate.parse(dto.getDateOfBirth()));
+            if (dto.getDateOfBirth() != null && !dto.getDateOfBirth().trim().isEmpty()) {
+                try {
+                    user.setDateOfBirth(java.time.LocalDate.parse(dto.getDateOfBirth().trim()));
+                } catch (Exception e) {
+                    user.setDateOfBirth(null);
+                }
+            } else if (dto.getDateOfBirth() != null && dto.getDateOfBirth().trim().isEmpty()) {
+                user.setDateOfBirth(null);
             }
+
             if (dto.getBloodGroup() != null) {
-                user.setBloodGroup(dto.getBloodGroup());
+                user.setBloodGroup(dto.getBloodGroup().trim().isEmpty() ? null : dto.getBloodGroup().trim());
             }
             if (dto.getAllergies() != null) {
-                user.setAllergies(dto.getAllergies());
+                user.setAllergies(dto.getAllergies().trim().isEmpty() ? null : dto.getAllergies().trim());
             }
             if (dto.getWeight() != null) {
-                user.setWeight(dto.getWeight());
+                user.setWeight(dto.getWeight().trim().isEmpty() ? null : dto.getWeight().trim());
             }
             if (dto.getHeartRate() != null) {
-                user.setHeartRate(dto.getHeartRate());
+                user.setHeartRate(dto.getHeartRate().trim().isEmpty() ? null : dto.getHeartRate().trim());
             }
             
             userRepository.save(user);
@@ -225,12 +431,71 @@ public class UserController {
             Map<String, Object> response = new HashMap<>();
             response.put("success", true);
             response.put("message", "Profile updated successfully");
+            response.put("profilePicture", user.getProfilePicture());
+            response.put("fullName", user.getFullName());
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, Object> response = new HashMap<>();
             response.put("success", false);
             response.put("message", "Error updating profile: " + e.getMessage());
             return ResponseEntity.badRequest().body(response);
+        }
+    }
+
+    @PostMapping(value = "/profile-picture", consumes = "multipart/form-data")
+    public ResponseEntity<?> uploadProfilePicture(@RequestParam("file") MultipartFile file) {
+        try {
+            if (file == null || file.isEmpty()) {
+                Map<String, Object> err = new HashMap<>();
+                err.put("success", false);
+                err.put("message", "Please select a file to upload");
+                return ResponseEntity.badRequest().body(err);
+            }
+
+            // Validate content type
+            String contentType = file.getContentType();
+            if (contentType == null || (!contentType.equalsIgnoreCase("image/jpeg") 
+                    && !contentType.equalsIgnoreCase("image/png") 
+                    && !contentType.equalsIgnoreCase("image/webp")
+                    && !contentType.equalsIgnoreCase("image/jpg"))) {
+                Map<String, Object> err = new HashMap<>();
+                err.put("success", false);
+                err.put("message", "Only JPG, PNG, and WebP image formats are supported");
+                return ResponseEntity.badRequest().body(err);
+            }
+
+            // Validate file size (max 5MB)
+            if (file.getSize() > 5 * 1024 * 1024) {
+                Map<String, Object> err = new HashMap<>();
+                err.put("success", false);
+                err.put("message", "File size cannot exceed 5MB");
+                return ResponseEntity.badRequest().body(err);
+            }
+
+            UserDetails userDetails = (UserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+            User user = userRepository.findByEmail(userDetails.getUsername())
+                    .orElseThrow(() -> new RuntimeException("User not found"));
+
+            String fileName = fileStorageService.storeFile(file);
+            String fileUrl = ServletUriComponentsBuilder.fromCurrentContextPath()
+                    .path("/uploads/")
+                    .path(fileName)
+                    .toUriString();
+
+            user.setProfilePicture(fileUrl);
+            user.setUpdatedAt(LocalDateTime.now());
+            userRepository.save(user);
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("success", true);
+            response.put("message", "Profile picture updated successfully");
+            response.put("profilePicture", fileUrl);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, Object> err = new HashMap<>();
+            err.put("success", false);
+            err.put("message", "Error uploading profile picture: " + e.getMessage());
+            return ResponseEntity.badRequest().body(err);
         }
     }
 

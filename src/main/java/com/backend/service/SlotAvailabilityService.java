@@ -56,17 +56,18 @@ public class SlotAvailabilityService {
             } catch (Exception ignored) {}
         }
 
-        // Cache existing booked appointments for the upcoming 14-day window to prevent double-booking
+        // Count existing booked appointments for the upcoming 14-day window to prevent double-booking
         List<Appointment> activeAppointments = appointmentRepository.findAll().stream()
                 .filter(a -> a.getAppointmentDate() != null && !a.getAppointmentDate().isBefore(today))
-                .filter(a -> !"CANCELLED".equalsIgnoreCase(a.getAppointmentStatus()))
+                .filter(a -> a.getAppointmentStatus() == null || (!a.getAppointmentStatus().equalsIgnoreCase("CANCELLED") && !a.getAppointmentStatus().equalsIgnoreCase("REJECTED") && !a.getAppointmentStatus().equalsIgnoreCase("EXPIRED")))
                 .collect(Collectors.toList());
 
-        // Set of "providerId_date_time" to quickly check for booking conflicts
-        Set<String> bookedSlots = new HashSet<>();
+        // Map of "providerId_date_time" to active booking counts
+        Map<String, Integer> bookedSlotCounts = new HashMap<>();
         for (Appointment a : activeAppointments) {
             if (a.getProviderId() != null && a.getAppointmentDate() != null && a.getAppointmentTime() != null) {
-                bookedSlots.add(a.getProviderId() + "_" + a.getAppointmentDate() + "_" + a.getAppointmentTime().toString().substring(0, 5));
+                String key = a.getProviderId() + "_" + a.getAppointmentDate() + "_" + a.getAppointmentTime().toString().substring(0, 5);
+                bookedSlotCounts.put(key, bookedSlotCounts.getOrDefault(key, 0) + 1);
             }
         }
 
@@ -88,6 +89,7 @@ public class SlotAvailabilityService {
                 String serviceName = "General Consultation";
                 double fee = 1500.0;
                 int durationMinutes = 30;
+                int maxCapacity = 1;
 
                 if (!services.isEmpty()) {
                     ProviderService matchingService = services.stream()
@@ -99,6 +101,7 @@ public class SlotAvailabilityService {
                     serviceName = matchingService.getServiceName();
                     if (matchingService.getFee() != null) fee = matchingService.getFee();
                     if (matchingService.getDurationMinutes() != null) durationMinutes = matchingService.getDurationMinutes();
+                    if (matchingService.getMaxCapacity() != null && matchingService.getMaxCapacity() > 0) maxCapacity = matchingService.getMaxCapacity();
                 }
 
                 // Check upcoming 14 days
@@ -131,19 +134,19 @@ public class SlotAvailabilityService {
                             }
                         }
 
-                        // Check conflict with booked appointments
+                        // Check capacity conflict
                         String conflictKey = provider.getId() + "_" + checkDate + "_" + slotTime.toString().substring(0, 5);
-                        boolean isAlreadyBooked = bookedSlots.contains(conflictKey);
+                        int currentBookings = bookedSlotCounts.getOrDefault(conflictKey, 0);
+                        boolean isAlreadyBooked = currentBookings >= maxCapacity;
+                        int availableSeats = Math.max(0, maxCapacity - currentBookings);
 
                         if (!isInBreak && !isAlreadyBooked) {
                             String priceStr = "रू " + String.format("%,d", (long) fee);
-                            String rawName = provider.getFullName() != null ? provider.getFullName().trim() : "Specialist";
-                            String providerTitle = (rawName.toLowerCase().startsWith("dr.") || rawName.toLowerCase().startsWith("dr "))
-                                    ? rawName
-                                    : "Dr. " + rawName;
-                            if (profile != null && profile.getPrimarySpecialty() != null) {
-                                providerTitle += " (" + profile.getPrimarySpecialty() + ")";
-                            }
+                            String providerDisplay = com.backend.util.OrganizationTerminology.formatProviderDisplay(
+                                    provider.getFullName(),
+                                    profile != null ? profile.getPrimarySpecialty() : null,
+                                    clinic.getOrganizationType()
+                            );
 
                             AISlotDTO slotDTO = AISlotDTO.builder()
                                     .id(String.valueOf(slotIdCounter))
@@ -151,13 +154,19 @@ public class SlotAvailabilityService {
                                     .date(checkDate.format(DATE_DISPLAY_FORMAT))
                                     .time(slotTime.format(TIME_DISPLAY_FORMAT))
                                     .price(priceStr)
-                                    .provider(providerTitle + " at " + clinic.getOrganizationName())
+                                    .provider(providerDisplay + " at " + clinic.getOrganizationName())
+                                    .providerTitle(providerDisplay)
+                                    .organizationType(clinic.getOrganizationType())
+                                    .organizationName(clinic.getOrganizationName())
                                     .rawDate(checkDate.toString())
                                     .rawTime(slotTime.toString().substring(0, 5))
                                     .tenantId(clinic.getId())
                                     .providerId(provider.getId())
                                     .serviceName(serviceName)
                                     .topMatch(false)
+                                    .maxCapacity(maxCapacity)
+                                    .availableSeats(availableSeats)
+                                    .isFull(isAlreadyBooked)
                                     .build();
 
                             allAvailableSlots.add(slotDTO);
@@ -215,7 +224,8 @@ public class SlotAvailabilityService {
                 // Provider match
                 if (preferredProviderId != null && preferredProviderId.equals(slot.getProviderId())) {
                     score += 30;
-                    matchReason.append("With your preferred doctor. ");
+                    com.backend.util.OrganizationTerminology terms = com.backend.util.OrganizationTerminology.from(slot.getOrganizationType());
+                    matchReason.append("With your preferred ").append(terms.getProviderTerm().toLowerCase()).append(". ");
                 }
 
                 // Early date bonus (prefer sooner within next 7 days)
@@ -240,7 +250,8 @@ public class SlotAvailabilityService {
         if (!slots.isEmpty()) {
             slots.get(0).setTopMatch(true);
             if (slots.get(0).getMatchReason() == null || slots.get(0).getMatchReason().isEmpty()) {
-                slots.get(0).setMatchReason("Top recommended slot based on clinic availability.");
+                String orgName = slots.get(0).getOrganizationName() != null ? slots.get(0).getOrganizationName() : "schedule";
+                slots.get(0).setMatchReason("Top recommended slot based on " + orgName + " availability.");
             }
         }
 

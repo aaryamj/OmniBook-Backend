@@ -9,6 +9,8 @@ import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 
 @Service
@@ -353,6 +355,91 @@ public class EmailService {
             log.info("Booking confirmation email sent to {}", appointment.getPatientEmail());
         } catch (Exception e) {
             log.error("Failed to send booking confirmation email to {}", appointment.getPatientEmail(), e);
+        }
+    }
+
+    public void sendAppointmentCancelledEmail(Appointment appointment) {
+        if (appointment.getPatientEmail() == null || appointment.getPatientEmail().isEmpty()) {
+            return;
+        }
+        try {
+            MimeMessage message = mailSender.createMimeMessage();
+            MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
+            helper.setTo(appointment.getPatientEmail());
+            helper.setSubject("Appointment Cancelled: " + appointment.getServiceName());
+
+            String dateStr = appointment.getAppointmentDate() != null ? appointment.getAppointmentDate().format(DateTimeFormatter.ofPattern("EEEE, MMM dd, yyyy")) : "N/A";
+            String timeStr = appointment.getAppointmentTime() != null ? appointment.getAppointmentTime().format(DateTimeFormatter.ofPattern("hh:mm a")) : "N/A";
+            String refundInfo = "";
+            if (appointment.getRefundEligibilityPercentage() != null && appointment.getRefundEligibilityPercentage() > 0) {
+                refundInfo = "<p><strong>Refund Eligibility:</strong> " + appointment.getRefundEligibilityPercentage() + "% (" + appointment.getRefundCurrency() + " " + appointment.getRefundAmount() + ")</p>" +
+                             "<p><strong>Refund Status:</strong> " + appointment.getRefundStatus() + "</p>";
+            } else {
+                refundInfo = "<p><strong>Refund Status:</strong> Not eligible for refund per cancellation policy.</p>";
+            }
+
+            String htmlContent = "<!DOCTYPE html><html><head><style>" +
+                "body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; padding: 20px; margin: 0; }" +
+                ".container { max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden; }" +
+                ".header { background: #fee2e2; padding: 20px; border-bottom: 1px solid #fecaca; text-align: center; }" +
+                ".header h3 { margin: 0; color: #991b1b; font-size: 20px; }" +
+                ".content { padding: 32px 24px; }" +
+                ".details { background: #f8fafc; padding: 20px; border-radius: 8px; margin-bottom: 24px; color: #334155; }" +
+                ".details p { margin: 8px 0; font-size: 14px; }" +
+                "</style></head><body><div class=\"container\">" +
+                "<div class=\"header\"><h3>Appointment Cancelled</h3></div>" +
+                "<div class=\"content\"><div class=\"details\">" +
+                "<p><strong>Service:</strong> " + appointment.getServiceName() + "</p>" +
+                "<p><strong>Date & Time:</strong> " + dateStr + " at " + timeStr + "</p>" +
+                "<p><strong>Cancellation Reason:</strong> " + (appointment.getCancellationReason() != null ? appointment.getCancellationReason() : "User Requested") + "</p>" +
+                refundInfo +
+                "</div><p style=\"color:#64748b;font-size:14px;\">If you have any questions, please contact our support team.</p></div></div></body></html>";
+
+            helper.setText(htmlContent, true);
+            mailSender.send(message);
+            log.info("Cancellation email sent to {}", appointment.getPatientEmail());
+        } catch (Exception e) {
+            log.error("Failed to send cancellation email to {}", appointment.getPatientEmail(), e);
+        }
+    }
+
+    public void sendAppointmentRescheduledEmail(Appointment appointment, LocalDate oldDate, LocalTime oldTime) {
+        if (appointment.getPatientEmail() == null || appointment.getPatientEmail().isEmpty()) {
+            return;
+        }
+        try {
+            MimeMessage message = mailSender.createMimeMessage();
+            MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
+            helper.setTo(appointment.getPatientEmail());
+            helper.setSubject("Appointment Rescheduled: " + appointment.getServiceName());
+
+            String oldDateStr = oldDate != null ? oldDate.format(DateTimeFormatter.ofPattern("EEEE, MMM dd, yyyy")) : "N/A";
+            String oldTimeStr = oldTime != null ? oldTime.format(DateTimeFormatter.ofPattern("hh:mm a")) : "N/A";
+            String newDateStr = appointment.getAppointmentDate() != null ? appointment.getAppointmentDate().format(DateTimeFormatter.ofPattern("EEEE, MMM dd, yyyy")) : "N/A";
+            String newTimeStr = appointment.getAppointmentTime() != null ? appointment.getAppointmentTime().format(DateTimeFormatter.ofPattern("hh:mm a")) : "N/A";
+
+            String htmlContent = "<!DOCTYPE html><html><head><style>" +
+                "body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; padding: 20px; margin: 0; }" +
+                ".container { max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden; }" +
+                ".header { background: #e0f2fe; padding: 20px; border-bottom: 1px solid #bae6fd; text-align: center; }" +
+                ".header h3 { margin: 0; color: #0369a1; font-size: 20px; }" +
+                ".content { padding: 32px 24px; }" +
+                ".details { background: #f8fafc; padding: 20px; border-radius: 8px; margin-bottom: 24px; color: #334155; }" +
+                ".details p { margin: 8px 0; font-size: 14px; }" +
+                "</style></head><body><div class=\"container\">" +
+                "<div class=\"header\"><h3>Appointment Rescheduled</h3></div>" +
+                "<div class=\"content\"><div class=\"details\">" +
+                "<p><strong>Service:</strong> " + appointment.getServiceName() + "</p>" +
+                "<p><strong>Previous Slot:</strong> <span style=\"text-decoration: line-through; color: #94a3b8;\">" + oldDateStr + " at " + oldTimeStr + "</span></p>" +
+                "<p><strong>New Slot:</strong> <strong style=\"color: #0284c7;\">" + newDateStr + " at " + newTimeStr + "</strong></p>" +
+                "<p><strong>Reschedule Count:</strong> " + appointment.getRescheduleCount() + "</p>" +
+                "</div><p style=\"color:#64748b;font-size:14px;\">Your appointment has been successfully updated. We look forward to seeing you!</p></div></div></body></html>";
+
+            helper.setText(htmlContent, true);
+            mailSender.send(message);
+            log.info("Rescheduled email sent to {}", appointment.getPatientEmail());
+        } catch (Exception e) {
+            log.error("Failed to send rescheduled email to {}", appointment.getPatientEmail(), e);
         }
     }
 

@@ -25,6 +25,7 @@ public interface UserRepository extends JpaRepository<User, Long> {
     Optional<User> findByResetPasswordTokenIgnoringTenant(@org.springframework.data.repository.query.Param("token") String token);
 
     boolean existsByRole(String role);
+    java.util.List<User> findByRole(String role);
     
     java.util.List<User> findByTenantIdAndRole(Long tenantId, String role);
     java.util.List<User> findByTenantId(Long tenantId);

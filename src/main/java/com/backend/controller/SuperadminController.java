@@ -23,6 +23,9 @@ public class SuperadminController {
     private final SystemKPIService systemKPIService;
     private final com.backend.service.FinancialReportService financialReportService;
     private final com.backend.service.SupportTicketService supportTicketService;
+    private final com.backend.service.SubscriptionPlanService subscriptionPlanService;
+    private final com.backend.service.SubscriptionService subscriptionService;
+    private final com.backend.service.CommissionService commissionService;
 
     @PostMapping("/tenants")
     public ResponseEntity<String> onboardClinic(@RequestBody OnboardClinicRequest request) {
@@ -161,6 +164,126 @@ public class SuperadminController {
     public ResponseEntity<java.util.List<com.backend.dto.GlobalSearchResultDTO>> globalSearch(
             @RequestParam(name = "q", defaultValue = "") String query) {
         return ResponseEntity.ok(superadminService.globalSearch(query));
+    }
+
+    // ==========================================
+    // SUBSCRIPTION PLAN MANAGEMENT
+    // ==========================================
+
+    @GetMapping("/plans")
+    public ResponseEntity<java.util.List<com.backend.dto.SubscriptionPlanDTO>> getAllPlans() {
+        return ResponseEntity.ok(subscriptionPlanService.getAllPlans());
+    }
+
+    @PostMapping("/plans")
+    public ResponseEntity<com.backend.dto.SubscriptionPlanDTO> createPlan(
+            @jakarta.validation.Valid @RequestBody com.backend.dto.SubscriptionPlanDTO dto) {
+        return ResponseEntity.ok(subscriptionPlanService.createPlan(dto));
+    }
+
+    @PutMapping("/plans/{id}")
+    public ResponseEntity<com.backend.dto.SubscriptionPlanDTO> updatePlan(
+            @PathVariable Long id,
+            @jakarta.validation.Valid @RequestBody com.backend.dto.SubscriptionPlanDTO dto) {
+        return ResponseEntity.ok(subscriptionPlanService.updatePlan(id, dto));
+    }
+
+    @PatchMapping("/plans/{id}/toggle")
+    public ResponseEntity<com.backend.dto.SubscriptionPlanDTO> togglePlanStatus(@PathVariable Long id) {
+        return ResponseEntity.ok(subscriptionPlanService.togglePlanStatus(id));
+    }
+
+    // ==========================================
+    // TENANT SUBSCRIPTIONS MANAGEMENT
+    // ==========================================
+
+    @GetMapping("/subscriptions/tenants")
+    public ResponseEntity<java.util.List<com.backend.dto.SuperadminSubscriptionTenantDTO>> getTenantSubscriptions() {
+        return ResponseEntity.ok(subscriptionService.getSuperadminTenantSubscriptions());
+    }
+
+    @PostMapping("/subscriptions/tenants/{id}/suspend")
+    public ResponseEntity<?> manualSuspendSubscription(
+            @PathVariable Long id,
+            @RequestBody(required = false) java.util.Map<String, String> payload,
+            java.security.Principal principal) {
+        try {
+            String reason = payload != null ? payload.get("reason") : "Suspended by Super Admin";
+            String admin = principal != null ? principal.getName() : "Super Admin";
+            subscriptionService.manualSuspendSubscription(id, reason, admin);
+            return ResponseEntity.ok(java.util.Map.of("message", "Subscription suspended successfully"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("message", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/subscriptions/tenants/{id}/reactivate")
+    public ResponseEntity<?> manualReactivateSubscription(
+            @PathVariable Long id,
+            java.security.Principal principal) {
+        try {
+            String admin = principal != null ? principal.getName() : "Super Admin";
+            subscriptionService.manualReactivateSubscription(id, admin);
+            return ResponseEntity.ok(java.util.Map.of("message", "Subscription reactivated successfully"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("message", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/subscriptions/tenants/{id}/extend")
+    public ResponseEntity<?> manualExtendSubscription(
+            @PathVariable Long id,
+            @RequestBody java.util.Map<String, Object> payload,
+            java.security.Principal principal) {
+        try {
+            int days = Integer.parseInt(payload.get("days").toString());
+            String reason = payload.get("reason") != null ? payload.get("reason").toString() : "Direct administrative extension";
+            String admin = principal != null ? principal.getName() : "Super Admin";
+            subscriptionService.manualExtendSubscription(id, days, reason, admin);
+            return ResponseEntity.ok(java.util.Map.of("message", "Subscription extended successfully by " + days + " days"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("message", e.getMessage()));
+        }
+    }
+
+    // ==========================================
+    // EXTENSION REQUESTS QUEUE
+    // ==========================================
+
+    @GetMapping("/subscriptions/extension-requests")
+    public ResponseEntity<java.util.List<com.backend.dto.SubscriptionExtensionRequestDTO>> getAllExtensionRequests() {
+        return ResponseEntity.ok(subscriptionService.getAllExtensionRequests());
+    }
+
+    @PostMapping("/subscriptions/extension-requests/{id}/review")
+    public ResponseEntity<?> reviewExtensionRequest(
+            @PathVariable Long id,
+            @RequestBody java.util.Map<String, Object> payload,
+            java.security.Principal principal) {
+        try {
+            boolean approved = Boolean.parseBoolean(payload.get("approved").toString());
+            Integer approvedDays = payload.get("approvedDays") != null ? Integer.parseInt(payload.get("approvedDays").toString()) : null;
+            String notes = payload.get("notes") != null ? payload.get("notes").toString() : null;
+            String admin = principal != null ? principal.getName() : "Super Admin";
+            return ResponseEntity.ok(subscriptionService.reviewExtensionRequest(id, approved, approvedDays, notes, admin));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("message", e.getMessage()));
+        }
+    }
+
+    // ==========================================
+    // APPOINTMENT COMMISSION RATE
+    // ==========================================
+
+    @PutMapping("/settings/commission-rate")
+    public ResponseEntity<?> updateCommissionRate(
+            @RequestBody java.util.Map<String, Object> payload) {
+        try {
+            Double rate = Double.parseDouble(payload.get("rate").toString());
+            return ResponseEntity.ok(commissionService.updateCommissionRate(rate));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("message", e.getMessage()));
+        }
     }
 }
 

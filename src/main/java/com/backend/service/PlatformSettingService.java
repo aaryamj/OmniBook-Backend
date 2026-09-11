@@ -64,6 +64,7 @@ public class PlatformSettingService {
                     .billingCycle("Annually")
                     .nextInvoiceDate("Oct 1, 2026")
                     .billingContactEmail("billing@omnibook.com")
+                    .appointmentCommissionRate(10.0)
                     .build();
 
             return platformSettingRepository.save(initial);
@@ -89,7 +90,7 @@ public class PlatformSettingService {
         platformInvoiceRepository.deleteById(id);
     }
 
-    @Transactional(readOnly = true)
+    @Transactional
     public PlatformSettingDTO getPlatformSettings() {
         PlatformSetting setting = getOrCreateSettings();
         List<PlatformInvoice> invoices = platformInvoiceRepository.findAllByOrderByCreatedAtDesc();
@@ -142,6 +143,7 @@ public class PlatformSettingService {
         if (dto.getBillingCycle() != null) setting.setBillingCycle(dto.getBillingCycle());
         if (dto.getNextInvoiceDate() != null) setting.setNextInvoiceDate(dto.getNextInvoiceDate());
         if (dto.getBillingContactEmail() != null) setting.setBillingContactEmail(dto.getBillingContactEmail());
+        if (dto.getAppointmentCommissionRate() != null) setting.setAppointmentCommissionRate(dto.getAppointmentCommissionRate());
 
         platformSettingRepository.save(setting);
 
@@ -241,6 +243,7 @@ public class PlatformSettingService {
                 .billingCycle(setting.getBillingCycle())
                 .nextInvoiceDate(setting.getNextInvoiceDate())
                 .billingContactEmail(setting.getBillingContactEmail())
+                .appointmentCommissionRate(setting.getAppointmentCommissionRate() != null ? setting.getAppointmentCommissionRate() : 10.0)
                 // Computed KPIs
                 .activeIntegrationsCount(activeIntegrations)
                 .onboardingModeBadge(onboardingBadge)

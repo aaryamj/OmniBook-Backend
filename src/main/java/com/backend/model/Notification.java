@@ -30,6 +30,7 @@ public class Notification {
 
     private String title;
     
+    @jakarta.persistence.Column(columnDefinition = "TEXT")
     private String message;
     
     private String type; // e.g. BOOKING, APPROVED, CHECKED_IN, COMPLETED, CANCELLED, RESCHEDULED, PAYMENT, TENANT_REGISTER, EMERGENCY_STOP

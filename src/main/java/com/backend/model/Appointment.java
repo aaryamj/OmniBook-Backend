@@ -52,12 +52,25 @@ public class Appointment {
 
     private String serviceName;
 
-    private Double price;
+    private Double price; // Canonical service price in NPR
+
+    @Builder.Default
+    private String baseCurrency = "NPR"; // Base single source-of-truth currency
+
+    private Double basePriceNpr; // Original NPR amount
+
+    private String chargedCurrency; // "NPR" or "USD"
+
+    private Double chargedAmount; // Converted or charged amount
+
+    private Double exchangeRate; // Applicable exchange rate (NPR per USD)
+
+    private LocalDateTime conversionTimestamp; // Timestamp when conversion occurred
 
     @Column(nullable = false)
     private String paymentStatus; // PENDING, SUCCESS, FAILED
 
-    private String paymentMethod; // ESEWA
+    private String paymentMethod; // ESEWA, STRIPE, CASH
 
     private String transactionId; // Reference ID from payment gateway
     
@@ -107,6 +120,38 @@ public class Appointment {
     private String cancelledByRole;
     private Long cancelledByUserId;
     private LocalDateTime cancelledAt;
+    private String cancellationReason;
+
+    // Rescheduling tracking
+    @Builder.Default
+    private Integer rescheduleCount = 0;
+    private LocalDate originalAppointmentDate;
+    private LocalTime originalAppointmentTime;
+    private LocalDateTime rescheduledAt;
+    private String rescheduledByName;
+    private String rescheduledByRole;
+
+    // Refund lifecycle & audit
+    private String refundStatus; // NOT_ELIGIBLE, ELIGIBLE, REFUND_REQUESTED, PROCESSING, REFUNDED, PARTIALLY_REFUNDED, FAILED
+    private Double refundEligibilityPercentage; // e.g. 100.0, 50.0, 0.0
+    private Double refundAmount; // In refund currency (USD for Stripe, NPR for eSewa)
+    private String refundCurrency; // "USD" or "NPR"
+    private String refundTransactionId; // Reference ID from payment gateway for refund
+    private LocalDateTime refundRequestedAt;
+    private LocalDateTime refundedAt;
+    private String refundFailureReason;
+    private String gatewayPaymentRef; // Stripe PaymentIntent ID or session ID
+
+    // No-Show tracking & Settlement
+    private LocalDateTime noShowAt;
+    private String noShowMarkedByName;
+    private String noShowMarkedByRole;
+    private String settlementStatus; // PENDING, SETTLED, ADJUSTED_REFUND, FORFEITED
+    private Double settlementAmount; // Amount retained / settled to provider (Net Service Provider)
+    private Double orgSettlementAmount; // Amount retained / settled to Organization Admin (Net Organization Admin)
+    private Double remainingOrgAmount; // Gross Remaining Organization Amount
+    private Double netRetainedAmount; // Gross Booking Amount - Refund Amount
+    private Double gatewayFeeAmount; // Applicable gateway fee
 
     @Transient
     private String patientProfilePicture;

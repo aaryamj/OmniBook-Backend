@@ -26,6 +26,21 @@ public class PaymentController {
     @Autowired
     private com.backend.repository.UserRepository userRepository;
 
+    @Autowired
+    private com.backend.service.CurrencyExchangeService currencyExchangeService;
+
+    @GetMapping("/exchange-rate")
+    public ResponseEntity<?> getExchangeRate() {
+        try {
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "data", currencyExchangeService.getRateDetails()
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
     @PostMapping("/initiate")
     public ResponseEntity<?> initiatePayment(@RequestBody PaymentRequestDTO request) {
         try {
@@ -65,7 +80,7 @@ public class PaymentController {
             }
             
             return ResponseEntity.status(302).location(URI.create("http://localhost:5173/payment-failed?error=verification_failed")).build();
-        } catch (Exception e) {
+        } catch (Throwable e) {
             e.printStackTrace();
             return ResponseEntity.status(302).location(URI.create("http://localhost:5173/payment-failed?error=parse_failed")).build();
         }
@@ -84,7 +99,7 @@ public class PaymentController {
             } else {
                 return ResponseEntity.status(302).location(URI.create("http://localhost:5173/payment-failed?error=verification_failed")).build();
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
             e.printStackTrace();
             return ResponseEntity.status(302).location(URI.create("http://localhost:5173/payment-failed?error=exception")).build();
         }
@@ -157,6 +172,12 @@ public class PaymentController {
             result.put("paymentStatus", first.getPaymentStatus());
             result.put("paymentMethod", first.getPaymentMethod());
             result.put("totalAmount", totalAmount > 0 ? totalAmount : (first.getPrice() != null ? first.getPrice() : 0.0));
+            result.put("baseCurrency", first.getBaseCurrency() != null ? first.getBaseCurrency() : "NPR");
+            result.put("basePriceNpr", first.getBasePriceNpr() != null ? first.getBasePriceNpr() : first.getPrice());
+            result.put("chargedCurrency", first.getChargedCurrency() != null ? first.getChargedCurrency() : ("STRIPE".equalsIgnoreCase(first.getPaymentMethod()) ? "USD" : "NPR"));
+            result.put("chargedAmount", first.getChargedAmount() != null ? first.getChargedAmount() : totalAmount);
+            result.put("exchangeRate", first.getExchangeRate() != null ? first.getExchangeRate() : ("STRIPE".equalsIgnoreCase(first.getPaymentMethod()) ? 135.0 : 1.0));
+            result.put("conversionTimestamp", first.getConversionTimestamp() != null ? first.getConversionTimestamp().toString() : null);
             result.put("slots", slotList);
 
             return ResponseEntity.ok(result);

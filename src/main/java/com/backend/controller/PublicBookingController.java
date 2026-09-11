@@ -66,6 +66,15 @@ public class PublicBookingController {
                 map.put("organizationType", t.getOrganizationType() != null ? t.getOrganizationType() : "Clinic");
                 map.put("address", t.getAddress());
                 map.put("logoUrl", t.getLogoUrl());
+
+                String tier = t.getSubscriptionTier() != null ? t.getSubscriptionTier() : "Starter";
+                boolean isExpiredOrSuspended = "EXPIRED".equalsIgnoreCase(t.getSubscriptionStatus()) 
+                        || "SUSPENDED".equalsIgnoreCase(t.getSubscriptionStatus())
+                        || (t.getSubscriptionExpiryDate() != null && java.time.LocalDate.now().isAfter(t.getSubscriptionExpiryDate()));
+                boolean hasAiBooking = !isExpiredOrSuspended && ("Professional".equalsIgnoreCase(tier) || "Enterprise".equalsIgnoreCase(tier));
+
+                map.put("subscriptionTier", tier);
+                map.put("hasAiBooking", hasAiBooking);
                 return map;
             }).collect(Collectors.toList());
 

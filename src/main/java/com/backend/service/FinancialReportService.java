@@ -1,6 +1,7 @@
 package com.backend.service;
 
 import com.backend.model.Tenant;
+import com.backend.repository.AppointmentCommissionRepository;
 import com.backend.repository.AppointmentRepository;
 import com.backend.repository.TenantRepository;
 import com.lowagie.text.Document;
@@ -25,6 +26,9 @@ public class FinancialReportService {
 
     private final TenantRepository tenantRepository;
     private final AppointmentRepository appointmentRepository;
+    private final RevenueAnalyticsService revenueAnalyticsService;
+    private final AppointmentCommissionRepository appointmentCommissionRepository;
+    private final CommissionService commissionService;
 
     private LocalDateTime parseTimePeriod(String timePeriod) {
         if (timePeriod == null) return null;
@@ -43,24 +47,28 @@ public class FinancialReportService {
         
         StringBuilder sb = new StringBuilder();
         if ("comprehensive".equalsIgnoreCase(reportType)) {
-            sb.append("Tenant ID,Clinic Name,Subscription Tier,Status,MRR (NPR),Total Appointments\n");
+            sb.append("Tenant ID,Organization Name,Subscription Tier,Status,Subscription MRR (NPR),Appointments,Appt Gross (NPR),Platform Commission (NPR),Provider Payout (NPR)\n");
             for (Tenant t : tenants) {
-                double mrr = calculateTenantMRR(t);
+                double mrr = revenueAnalyticsService.calculateTenantMRR(t);
                 long appointments = getTenantAppointments(t.getId(), startDate);
-                sb.append(String.format("%d,\"%s\",\"%s\",\"%s\",%.2f,%d\n", 
-                    t.getId(), t.getOrganizationName(), t.getSubscriptionTier(), t.getStatus(), mrr, appointments));
+                double gross = getTenantGrossAppointments(t.getId(), startDate);
+                double commission = getTenantCommission(t.getId(), startDate);
+                double payout = gross - commission;
+
+                sb.append(String.format("%d,\"%s\",\"%s\",\"%s\",%.2f,%d,%.2f,%.2f,%.2f\n", 
+                    t.getId(), t.getOrganizationName(), t.getSubscriptionTier() != null ? t.getSubscriptionTier() : "Starter", 
+                    t.getStatus(), mrr, appointments, gross, commission, payout));
             }
         } else {
             // Payouts
-            sb.append("Tenant ID,Clinic Name,Total Revenue (NPR),Platform Fee (5%),Net Payout,Status\n");
+            double defaultRate = commissionService.getCurrentCommissionRate();
+            sb.append(String.format("Tenant ID,Organization Name,Total Gross (NPR),Platform Fee (%.1f%%),Net Provider Payout,Status\n", defaultRate));
             for (Tenant t : tenants) {
-                long appointments = getTenantAppointments(t.getId(), startDate);
-                // Simulate an average ticket size of 1500 NPR per appointment
-                double revenue = appointments * 1500.0;
-                double fee = revenue * 0.05;
-                double net = revenue - fee;
-                sb.append(String.format("%d,\"%s\",%.2f,%.2f,%.2f,Pending\n",
-                    t.getId(), t.getOrganizationName(), revenue, fee, net));
+                double gross = getTenantGrossAppointments(t.getId(), startDate);
+                double fee = getTenantCommission(t.getId(), startDate);
+                double net = gross - fee;
+                sb.append(String.format("%d,\"%s\",%.2f,%.2f,%.2f,Processed\n",
+                    t.getId(), t.getOrganizationName(), gross, fee, net));
             }
         }
         return sb.toString().getBytes();
@@ -77,54 +85,62 @@ public class FinancialReportService {
             PdfWriter.getInstance(document, out);
             document.open();
             
-            document.add(new Paragraph("OmniBook Enterprise - Financial Report", FontFactory.getFont(FontFactory.HELVETICA_BOLD, 18)));
-            document.add(new Paragraph("Report Type: " + (reportType.equals("comprehensive") ? "Comprehensive Ledger" : "Tenant Payouts")));
+            document.add(new Paragraph("OmniBook Enterprise - Financial & Revenue Report", FontFactory.getFont(FontFactory.HELVETICA_BOLD, 18)));
+            document.add(new Paragraph("Report Type: " + (reportType.equals("comprehensive") ? "Comprehensive Ledger (Subscription MRR & Commissions)" : "Tenant Payouts Ledger")));
             document.add(new Paragraph("Time Period: " + (timePeriod != null ? timePeriod : "All Time")));
             document.add(new Paragraph("Generated At: " + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))));
             document.add(new Paragraph(" "));
 
             if ("comprehensive".equalsIgnoreCase(reportType)) {
-                PdfPTable table = new PdfPTable(6);
+                PdfPTable table = new PdfPTable(8);
                 table.setWidthPercentage(100);
-                table.addCell("Tenant ID");
-                table.addCell("Clinic Name");
-                table.addCell("Subscription Tier");
+                table.addCell("ID");
+                table.addCell("Organization");
+                table.addCell("Plan Tier");
                 table.addCell("Status");
                 table.addCell("MRR (NPR)");
-                table.addCell("Appointments");
+                table.addCell("Appts");
+                table.addCell("Commission (NPR)");
+                table.addCell("Provider Payout (NPR)");
 
                 for (Tenant t : tenants) {
-                    double mrr = calculateTenantMRR(t);
+                    double mrr = revenueAnalyticsService.calculateTenantMRR(t);
                     long appointments = getTenantAppointments(t.getId(), startDate);
+                    double gross = getTenantGrossAppointments(t.getId(), startDate);
+                    double commission = getTenantCommission(t.getId(), startDate);
+                    double payout = gross - commission;
+
                     table.addCell(String.valueOf(t.getId()));
                     table.addCell(t.getOrganizationName());
-                    table.addCell(t.getSubscriptionTier() != null ? t.getSubscriptionTier() : "None");
+                    table.addCell(t.getSubscriptionTier() != null ? t.getSubscriptionTier() : "Starter");
                     table.addCell(t.getStatus());
                     table.addCell(String.format("%.2f", mrr));
                     table.addCell(String.valueOf(appointments));
+                    table.addCell(String.format("%.2f", commission));
+                    table.addCell(String.format("%.2f", payout));
                 }
                 document.add(table);
             } else {
                 PdfPTable table = new PdfPTable(6);
                 table.setWidthPercentage(100);
-                table.addCell("Tenant ID");
-                table.addCell("Clinic Name");
-                table.addCell("Total Revenue");
-                table.addCell("Platform Fee (5%)");
-                table.addCell("Net Payout");
+                table.addCell("ID");
+                table.addCell("Organization");
+                table.addCell("Total Gross (NPR)");
+                table.addCell("Platform Fee");
+                table.addCell("Net Payout (NPR)");
                 table.addCell("Status");
 
                 for (Tenant t : tenants) {
-                    long appointments = getTenantAppointments(t.getId(), startDate);
-                    double revenue = appointments * 1500.0;
-                    double fee = revenue * 0.05;
-                    double net = revenue - fee;
+                    double gross = getTenantGrossAppointments(t.getId(), startDate);
+                    double fee = getTenantCommission(t.getId(), startDate);
+                    double net = gross - fee;
+
                     table.addCell(String.valueOf(t.getId()));
                     table.addCell(t.getOrganizationName());
-                    table.addCell(String.format("%.2f", revenue));
+                    table.addCell(String.format("%.2f", gross));
                     table.addCell(String.format("%.2f", fee));
                     table.addCell(String.format("%.2f", net));
-                    table.addCell("Pending");
+                    table.addCell("Settled");
                 }
                 document.add(table);
             }
@@ -147,18 +163,26 @@ public class FinancialReportService {
         return tenants;
     }
 
-    private double calculateTenantMRR(Tenant t) {
-        if (!"ACTIVE".equalsIgnoreCase(t.getStatus())) return 0.0;
-        String tier = t.getSubscriptionTier() != null ? t.getSubscriptionTier().toLowerCase() : "";
-        if (tier.contains("enterprise")) return 30000.0;
-        if (tier.contains("pro") || tier.contains("professional")) return 15000.0;
-        return 5000.0;
-    }
-
     private long getTenantAppointments(Long tenantId, LocalDateTime startDate) {
         if (startDate != null) {
             return appointmentRepository.countByTenantIdAndCreatedAtAfter(tenantId, startDate);
         }
         return appointmentRepository.countByTenantId(tenantId);
+    }
+
+    private double getTenantGrossAppointments(Long tenantId, LocalDateTime startDate) {
+        return appointmentRepository.findByTenantId(tenantId).stream()
+                .filter(a -> startDate == null || (a.getCreatedAt() != null && !a.getCreatedAt().isBefore(startDate)))
+                .filter(a -> "SUCCESS".equalsIgnoreCase(a.getPaymentStatus()) || "PAID".equalsIgnoreCase(a.getPaymentStatus()))
+                .mapToDouble(a -> a.getPrice() != null ? a.getPrice() : 0.0)
+                .sum();
+    }
+
+    private double getTenantCommission(Long tenantId, LocalDateTime startDate) {
+        Double comm = appointmentCommissionRepository.sumCommissionByTenant(tenantId);
+        if (comm != null && comm > 0.0) return comm;
+        double gross = getTenantGrossAppointments(tenantId, startDate);
+        double rate = commissionService.getCurrentCommissionRate();
+        return Math.round((gross * (rate / 100.0)) * 100.0) / 100.0;
     }
 }

@@ -57,6 +57,11 @@ public class PlatformInvoice {
 
     private String orderNumber;
 
+    private Long tenantId;
+    private java.time.LocalDate subscriptionStartDate;
+    private java.time.LocalDate subscriptionExpiryDate;
+    private LocalDateTime transactionDate;
+
     private String billingCycle;
     private String verificationStatus; // "PENDING_REVIEW", "APPROVED", "REJECTED"
     private String transactionId;

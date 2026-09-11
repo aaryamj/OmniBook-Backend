@@ -14,6 +14,8 @@ public interface TenantRepository extends JpaRepository<Tenant, Long> {
 
     boolean existsByRegistrationNumber(String registrationNumber);
 
+    java.util.Optional<Tenant> findByRegistrationNumber(String registrationNumber);
+
     @Query("SELECT DISTINCT t.address FROM Tenant t WHERE t.status = 'ACTIVE' AND t.address IS NOT NULL")
     java.util.List<String> findDistinctAddress();
 

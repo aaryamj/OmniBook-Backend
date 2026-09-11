@@ -53,6 +53,7 @@ public class PlatformSettingDTO {
     private String billingCycle;
     private String nextInvoiceDate;
     private String billingContactEmail;
+    private Double appointmentCommissionRate;
 
     // Computed KPIs
     private Integer activeIntegrationsCount;

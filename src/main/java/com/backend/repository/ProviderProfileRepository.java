@@ -9,6 +9,9 @@ import java.util.Optional;
 public interface ProviderProfileRepository extends JpaRepository<ProviderProfile, Long> {
     Optional<ProviderProfile> findByUser(User user);
 
+    @org.springframework.data.jpa.repository.Query("SELECT p FROM ProviderProfile p WHERE p.user.id = :userId")
+    Optional<ProviderProfile> findByUserId(@org.springframework.data.repository.query.Param("userId") Long userId);
+
     @org.springframework.data.jpa.repository.Query("SELECT p FROM ProviderProfile p WHERE p.user.tenant.id = :tenantId")
     java.util.List<ProviderProfile> findByTenantId(@org.springframework.data.repository.query.Param("tenantId") Long tenantId);
 

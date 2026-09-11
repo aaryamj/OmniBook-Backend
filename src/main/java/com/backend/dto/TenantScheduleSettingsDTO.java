@@ -13,5 +13,6 @@ import java.util.List;
 public class TenantScheduleSettingsDTO {
     private String timezone;
     private Integer slotDuration;
+    private Integer noShowGracePeriodMinutes;
     private List<TenantScheduleDTO> schedules;
 }

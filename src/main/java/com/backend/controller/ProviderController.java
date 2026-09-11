@@ -43,6 +43,7 @@ public class ProviderController {
     private final com.backend.service.ProviderAnalyticsService providerAnalyticsService;
     private final com.backend.service.AuditLogService auditLogService;
     private final com.backend.service.AdminService adminService;
+    private final com.backend.service.AppointmentLifecycleService appointmentLifecycleService;
 
     @GetMapping("/profile")
     public ResponseEntity<?> getProfile() {
@@ -537,6 +538,23 @@ public class ProviderController {
                     checkedInAny = true;
                     System.out.println("DEBUG CHECKIN: Successfully checked in appointment ID: " + appointment.getId());
 
+                    // Record lifecycle audit event
+                    try {
+                        String actorRole = user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole();
+                        appointmentLifecycleService.recordLifecycleEvent(
+                                appointment.getId(),
+                                appointment.getTenantId(),
+                                "CHECKED_IN",
+                                user.getId(),
+                                appointment.getCheckedInByName(),
+                                actorRole,
+                                "SCHEDULED",
+                                "CHECKED_IN",
+                                "Client checked in by " + actorRole + " (" + appointment.getCheckedInByName() + ")",
+                                null
+                        );
+                    } catch (Exception ignored) {}
+
                     // Dispatch role-separated check-in notifications
                     try {
                         notificationService.notifyAppointmentCheckedIn(appointment);
@@ -593,6 +611,23 @@ public class ProviderController {
             appointment.setApprovedByUserId(user.getId());
             appointmentRepository.save(appointment);
 
+            // Record lifecycle audit event
+            try {
+                String actorRole = user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole();
+                appointmentLifecycleService.recordLifecycleEvent(
+                        appointment.getId(),
+                        appointment.getTenantId(),
+                        "CONFIRMED",
+                        user.getId(),
+                        appointment.getApprovedByName(),
+                        actorRole,
+                        "PENDING_APPROVAL",
+                        "SCHEDULED",
+                        "Appointment approved and confirmed by " + actorRole + " (" + appointment.getApprovedByName() + ")",
+                        null
+                );
+            } catch (Exception ignored) {}
+
             // Send approval email
             try {
                 emailService.sendAppointmentApprovedEmail(appointment);
@@ -646,6 +681,23 @@ public class ProviderController {
             appointment.setCancelledByRole(user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole());
             appointment.setCancelledByUserId(user.getId());
             appointmentRepository.save(appointment);
+
+            // Record lifecycle audit event
+            try {
+                String actorRole = user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole();
+                appointmentLifecycleService.recordLifecycleEvent(
+                        appointment.getId(),
+                        appointment.getTenantId(),
+                        "CANCELLED",
+                        user.getId(),
+                        appointment.getCancelledByName(),
+                        actorRole,
+                        "SCHEDULED",
+                        "CANCELLED",
+                        "Appointment declined and cancelled by " + actorRole + " (" + appointment.getCancelledByName() + ")",
+                        null
+                );
+            } catch (Exception ignored) {}
 
             try {
                 String actorRole = user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole();
@@ -815,6 +867,24 @@ public class ProviderController {
             
             String feedbackToken = java.util.UUID.randomUUID().toString().substring(0, 8);
             appointment.setFeedbackToken(feedbackToken);
+            appointmentRepository.save(appointment);
+
+            // Record lifecycle audit event
+            try {
+                String actorRole = user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole();
+                appointmentLifecycleService.recordLifecycleEvent(
+                        appointment.getId(),
+                        appointment.getTenantId(),
+                        "COMPLETED",
+                        user.getId(),
+                        appointment.getCompletedByName(),
+                        actorRole,
+                        "CHECKED_IN",
+                        "COMPLETED",
+                        "Appointment completed successfully by " + actorRole + " (" + appointment.getCompletedByName() + ")",
+                        null
+                );
+            } catch (Exception ignored) {}
             
             // Handle follow-up
             if (payload.containsKey("followUpMonths") && payload.get("followUpMonths") != null) {

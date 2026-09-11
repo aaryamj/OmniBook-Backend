@@ -112,13 +112,11 @@ public class ProviderAnalyticsService {
 
         // 2. Compute KPIs
         double currentRevenue = currentPeriodAppts.stream()
-                .filter(a -> !"CANCELLED".equalsIgnoreCase(a.getAppointmentStatus()) && !"NO_SHOW".equalsIgnoreCase(a.getAppointmentStatus()))
-                .mapToDouble(a -> a.getPrice() != null ? a.getPrice() : 0.0)
+                .mapToDouble(this::getProviderRevenueForAppointment)
                 .sum();
 
         double prevRevenue = prevPeriodAppts.stream()
-                .filter(a -> !"CANCELLED".equalsIgnoreCase(a.getAppointmentStatus()) && !"NO_SHOW".equalsIgnoreCase(a.getAppointmentStatus()))
-                .mapToDouble(a -> a.getPrice() != null ? a.getPrice() : 0.0)
+                .mapToDouble(this::getProviderRevenueForAppointment)
                 .sum();
 
         long currentTotalAppointments = currentPeriodAppts.size();
@@ -167,8 +165,7 @@ public class ProviderAnalyticsService {
                     String name = entry.getKey();
                     long volume = entry.getValue().size();
                     double rev = entry.getValue().stream()
-                            .filter(a -> !"CANCELLED".equalsIgnoreCase(a.getAppointmentStatus()) && !"NO_SHOW".equalsIgnoreCase(a.getAppointmentStatus()))
-                            .mapToDouble(a -> a.getPrice() != null ? a.getPrice() : 0.0)
+                            .mapToDouble(this::getProviderRevenueForAppointment)
                             .sum();
                     return ProviderAnalyticsDTO.ServiceVolumeDTO.builder()
                             .name(name)
@@ -207,12 +204,12 @@ public class ProviderAnalyticsService {
                     if ("COMPLETED".equalsIgnoreCase(a.getAppointmentStatus()) || "SUCCESS".equalsIgnoreCase(a.getPaymentStatus())) {
                         status = "Confirmed";
                     } else if ("CANCELLED".equalsIgnoreCase(a.getAppointmentStatus())) {
-                        status = "Cancelled";
+                        status = (a.getSettlementAmount() != null && a.getSettlementAmount() > 0) ? "Cancelled (Retained)" : "Cancelled";
                     } else if ("NO_SHOW".equalsIgnoreCase(a.getAppointmentStatus())) {
-                        status = "No-Show";
+                        status = (a.getSettlementAmount() != null && a.getSettlementAmount() > 0) ? "No-Show (Settled)" : "No-Show";
                     }
 
-                    double amount = a.getPrice() != null ? a.getPrice() : 0.0;
+                    double amount = getProviderRevenueForAppointment(a);
                     String formattedAmount = numFmt.format(Math.round(amount));
 
                     return ProviderAnalyticsDTO.AnalyticsTransactionDTO.builder()
@@ -246,6 +243,22 @@ public class ProviderAnalyticsService {
                 .build();
     }
 
+    /**
+     * Resolves the actual provider revenue contribution for an appointment.
+     * When an appointment is cancelled or marked as No-Show, the provider receives the net provider settlement
+     * calculated after refund deductions, platform commissions, and applicable gateway fees.
+     */
+    public double getProviderRevenueForAppointment(Appointment a) {
+        if (a == null) return 0.0;
+        if (a.getSettlementAmount() != null) {
+            return a.getSettlementAmount();
+        }
+        if ("CANCELLED".equalsIgnoreCase(a.getAppointmentStatus()) || "NO_SHOW".equalsIgnoreCase(a.getAppointmentStatus())) {
+            return 0.0;
+        }
+        return a.getPrice() != null ? a.getPrice() : 0.0;
+    }
+
     private List<ProviderAnalyticsDTO.TrendDataPoint> computeTrends(List<Appointment> appts, String range, LocalDate start, LocalDate end) {
         List<ProviderAnalyticsDTO.TrendDataPoint> result = new ArrayList<>();
 
@@ -256,8 +269,7 @@ public class ProviderAnalyticsService {
                 int h = 9 + (i * 2);
                 double rev = appts.stream()
                         .filter(a -> a.getAppointmentTime() != null && a.getAppointmentTime().getHour() >= h && a.getAppointmentTime().getHour() < h + 2)
-                        .filter(a -> !"CANCELLED".equalsIgnoreCase(a.getAppointmentStatus()) && !"NO_SHOW".equalsIgnoreCase(a.getAppointmentStatus()))
-                        .mapToDouble(a -> a.getPrice() != null ? a.getPrice() : 0.0)
+                        .mapToDouble(this::getProviderRevenueForAppointment)
                         .sum();
                 long count = appts.stream()
                         .filter(a -> a.getAppointmentTime() != null && a.getAppointmentTime().getHour() >= h && a.getAppointmentTime().getHour() < h + 2)
@@ -270,8 +282,7 @@ public class ProviderAnalyticsService {
                 LocalDate cur = start.plusDays(i);
                 double rev = appts.stream()
                         .filter(a -> a.getAppointmentDate() != null && a.getAppointmentDate().isEqual(cur))
-                        .filter(a -> !"CANCELLED".equalsIgnoreCase(a.getAppointmentStatus()) && !"NO_SHOW".equalsIgnoreCase(a.getAppointmentStatus()))
-                        .mapToDouble(a -> a.getPrice() != null ? a.getPrice() : 0.0)
+                        .mapToDouble(this::getProviderRevenueForAppointment)
                         .sum();
                 long count = appts.stream()
                         .filter(a -> a.getAppointmentDate() != null && a.getAppointmentDate().isEqual(cur))
@@ -286,8 +297,7 @@ public class ProviderAnalyticsService {
                 String label = bStart.format(DateTimeFormatter.ofPattern("MMM d"));
                 double rev = appts.stream()
                         .filter(a -> a.getAppointmentDate() != null && !a.getAppointmentDate().isBefore(bStart) && !a.getAppointmentDate().isAfter(bEnd))
-                        .filter(a -> !"CANCELLED".equalsIgnoreCase(a.getAppointmentStatus()) && !"NO_SHOW".equalsIgnoreCase(a.getAppointmentStatus()))
-                        .mapToDouble(a -> a.getPrice() != null ? a.getPrice() : 0.0)
+                        .mapToDouble(this::getProviderRevenueForAppointment)
                         .sum();
                 long count = appts.stream()
                         .filter(a -> a.getAppointmentDate() != null && !a.getAppointmentDate().isBefore(bStart) && !a.getAppointmentDate().isAfter(bEnd))
@@ -327,8 +337,7 @@ public class ProviderAnalyticsService {
 
                 double rev = appts.stream()
                         .filter(a -> a.getAppointmentDate() != null && a.getAppointmentDate().getMonthValue() == m && a.getAppointmentDate().getYear() == y)
-                        .filter(a -> !"CANCELLED".equalsIgnoreCase(a.getAppointmentStatus()) && !"NO_SHOW".equalsIgnoreCase(a.getAppointmentStatus()))
-                        .mapToDouble(a -> a.getPrice() != null ? a.getPrice() : 0.0)
+                        .mapToDouble(this::getProviderRevenueForAppointment)
                         .sum();
                 long count = appts.stream()
                         .filter(a -> a.getAppointmentDate() != null && a.getAppointmentDate().getMonthValue() == m && a.getAppointmentDate().getYear() == y)
@@ -351,8 +360,7 @@ public class ProviderAnalyticsService {
 
                     double rev = appts.stream()
                             .filter(a -> a.getAppointmentDate() != null && a.getAppointmentDate().getMonthValue() == m && a.getAppointmentDate().getYear() == y)
-                            .filter(a -> !"CANCELLED".equalsIgnoreCase(a.getAppointmentStatus()) && !"NO_SHOW".equalsIgnoreCase(a.getAppointmentStatus()))
-                            .mapToDouble(a -> a.getPrice() != null ? a.getPrice() : 0.0)
+                            .mapToDouble(this::getProviderRevenueForAppointment)
                             .sum();
                     long count = appts.stream()
                             .filter(a -> a.getAppointmentDate() != null && a.getAppointmentDate().getMonthValue() == m && a.getAppointmentDate().getYear() == y)

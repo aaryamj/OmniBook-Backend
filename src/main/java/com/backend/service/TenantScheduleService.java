@@ -62,6 +62,7 @@ public class TenantScheduleService {
         return TenantScheduleSettingsDTO.builder()
                 .timezone(tenant.getTimezone() != null ? tenant.getTimezone() : "Asia/Kathmandu")
                 .slotDuration(tenant.getSlotDuration() != null ? tenant.getSlotDuration() : 30)
+                .noShowGracePeriodMinutes(tenant.getNoShowGracePeriodMinutes() != null ? tenant.getNoShowGracePeriodMinutes() : 15)
                 .schedules(scheduleDTOs)
                 .build();
     }
@@ -96,6 +97,9 @@ public class TenantScheduleService {
         }
         if (request.getSlotDuration() != null) {
             tenant.setSlotDuration(request.getSlotDuration());
+        }
+        if (request.getNoShowGracePeriodMinutes() != null) {
+            tenant.setNoShowGracePeriodMinutes(request.getNoShowGracePeriodMinutes());
         }
         tenantRepository.save(tenant);
 
@@ -146,16 +150,18 @@ public class TenantScheduleService {
             }
         }
 
-        // Delegation Rule: Automatically update schedules of service providers who have delegated their schedule
+        // Facility Operating Hours Enforcement:
+        // 1. Any day closed at the tenant level MUST close that day for ALL providers in that tenant.
+        // 2. Delegated providers synchronize all active and closed days.
         List<User> tenantUsers = userRepository.findByTenantId(tenant.getId());
-        List<User> delegatedProviders = tenantUsers.stream()
+        List<User> allProviders = tenantUsers.stream()
                 .filter(u -> u.getRole() != null && u.getRole().toLowerCase().contains("provider"))
-                .filter(u -> u.getIsScheduleDelegated() == null || Boolean.TRUE.equals(u.getIsScheduleDelegated()))
                 .collect(Collectors.toList());
 
-        if (!delegatedProviders.isEmpty()) {
+        if (!allProviders.isEmpty()) {
             List<TenantSchedule> updatedTenantSchedules = scheduleRepository.findByTenantId(tenant.getId());
-            for (User provider : delegatedProviders) {
+            for (User provider : allProviders) {
+                boolean isDelegated = provider.getIsScheduleDelegated() == null || Boolean.TRUE.equals(provider.getIsScheduleDelegated());
                 for (TenantSchedule ts : updatedTenantSchedules) {
                     ProviderSchedule ps = providerScheduleRepository.findByProviderAndDayOfWeek(provider, ts.getDayOfWeek())
                             .orElseGet(() -> ProviderSchedule.builder()
@@ -163,14 +169,20 @@ public class TenantScheduleService {
                                     .dayOfWeek(ts.getDayOfWeek())
                                     .build());
 
-                    ps.setIsActive(ts.getIsActive());
-                    ps.setOpeningTime(ts.getOpeningTime());
-                    ps.setClosingTime(ts.getClosingTime());
-                    ps.setBreakStartTime(ts.getBreakStartTime());
-                    ps.setBreakEndTime(ts.getBreakEndTime());
-                    ps.setClosedMessage(ts.getClosedMessage());
-
-                    providerScheduleRepository.save(ps);
+                    if (!Boolean.TRUE.equals(ts.getIsActive())) {
+                        // Salon / Facility is closed on this day -> provider MUST be closed
+                        ps.setIsActive(false);
+                        ps.setClosedMessage(ts.getClosedMessage() != null ? ts.getClosedMessage() : "Closed by Administrator");
+                        providerScheduleRepository.save(ps);
+                    } else if (isDelegated) {
+                        ps.setIsActive(true);
+                        ps.setOpeningTime(ts.getOpeningTime());
+                        ps.setClosingTime(ts.getClosingTime());
+                        ps.setBreakStartTime(ts.getBreakStartTime());
+                        ps.setBreakEndTime(ts.getBreakEndTime());
+                        ps.setClosedMessage(null);
+                        providerScheduleRepository.save(ps);
+                    }
                 }
             }
         }

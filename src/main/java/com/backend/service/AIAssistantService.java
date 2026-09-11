@@ -64,6 +64,36 @@ public class AIAssistantService {
 
         // Persist active tenant/service in conversation summary for multi-turn memory
         if (selectedTenant != null) {
+            String tier = selectedTenant.getSubscriptionTier() != null ? selectedTenant.getSubscriptionTier() : "Starter";
+            boolean isExpiredOrSuspended = "EXPIRED".equalsIgnoreCase(selectedTenant.getSubscriptionStatus()) 
+                    || "SUSPENDED".equalsIgnoreCase(selectedTenant.getSubscriptionStatus())
+                    || (selectedTenant.getSubscriptionExpiryDate() != null && LocalDate.now().isAfter(selectedTenant.getSubscriptionExpiryDate()));
+            boolean hasAiBooking = !isExpiredOrSuspended && ("Professional".equalsIgnoreCase(tier) || "Enterprise".equalsIgnoreCase(tier));
+
+            if (!hasAiBooking) {
+                String orgName = selectedTenant.getOrganizationName();
+                String msg = "Smart AI Booking is available for organizations on the Professional & Enterprise tiers. "
+                        + orgName + " is currently on the " + tier + " Plan with standard calendar scheduling. Please switch to the Classic Calendar to book your slot.";
+                
+                AIChatMessage aiMsg = AIChatMessage.builder()
+                        .conversation(conversation)
+                        .role("ai")
+                        .content(msg)
+                        .actionSlotId(null)
+                        .actionType("PLAN_RESTRICTION")
+                        .isSummarized(false)
+                        .build();
+                chatMessageRepository.save(aiMsg);
+
+                return AIChatResponseDTO.builder()
+                        .conversationId(conversation.getConversationId())
+                        .responseText(msg)
+                        .actionSlotId(null)
+                        .actionType("PLAN_RESTRICTION")
+                        .recommendedSlots(Collections.emptyList())
+                        .build();
+            }
+
             String updatedSummary = updateConversationState(conversation.getSummary(), selectedTenant.getId(),
                     activeService);
             conversation.setSummary(updatedSummary);
@@ -201,6 +231,22 @@ public class AIAssistantService {
      * Recommends valid appointment slots tailored to user history.
      */
     public List<AISlotDTO> getRecommendations(String userEmail, String clinicId, String providerId, String service) {
+        if (clinicId != null && !clinicId.trim().isEmpty()) {
+            try {
+                Long tid = Long.parseLong(clinicId.trim());
+                Tenant t = tenantRepository.findById(tid).orElse(null);
+                if (t != null) {
+                    String tier = t.getSubscriptionTier() != null ? t.getSubscriptionTier() : "Starter";
+                    boolean isExpiredOrSuspended = "EXPIRED".equalsIgnoreCase(t.getSubscriptionStatus()) 
+                            || "SUSPENDED".equalsIgnoreCase(t.getSubscriptionStatus())
+                            || (t.getSubscriptionExpiryDate() != null && LocalDate.now().isAfter(t.getSubscriptionExpiryDate()));
+                    boolean hasAi = !isExpiredOrSuspended && ("Professional".equalsIgnoreCase(tier) || "Enterprise".equalsIgnoreCase(tier));
+                    if (!hasAi) {
+                        return Collections.emptyList();
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
         PatientAppointmentPatternDTO pattern = historyAnalyticsService.analyzePatientHistory(userEmail);
         return slotAvailabilityService.getVerifiedAvailableSlots(pattern, clinicId, providerId, service);
     }

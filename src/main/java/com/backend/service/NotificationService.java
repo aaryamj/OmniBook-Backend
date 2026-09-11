@@ -81,7 +81,7 @@ public class NotificationService {
         return getTermsForTenant(appt.getTenantId());
     }
 
-    @Transactional
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
     public Notification createNotification(Long userId, String targetRole, Long tenantId, String title, String message, String type, String link) {
         try {
             Notification notification = Notification.builder()
@@ -318,6 +318,42 @@ public class NotificationService {
                     terms.session + " Cancelled",
                     terms.session + " #" + appointment.getId() + " (" + appointment.getPatientName() + ") was cancelled.",
                     "CANCELLED",
+                    "/admin/appointments?search=" + appointment.getId());
+        }
+    }
+
+    @Transactional
+    public void notifyAppointmentNoShow(Appointment appointment) {
+        if (appointment == null) return;
+        DynamicTerms terms = getTermsForAppointment(appointment);
+        Long tenantId = appointment.getTenantId();
+        Long patientUserId = resolvePatientUserId(appointment);
+
+        String refundNote = (appointment.getRefundEligibilityPercentage() != null && appointment.getRefundEligibilityPercentage() > 0.0)
+                ? (" A " + appointment.getRefundEligibilityPercentage() + "% refund has been initiated.")
+                : " Per organization policy, booking capacity was reserved with 0% refund.";
+
+        if (patientUserId != null) {
+            notifyUser(patientUserId,
+                    terms.session + " Marked as No-Show",
+                    "Your " + terms.session.toLowerCase() + " on " + appointment.getAppointmentDate() + " was marked as No-Show." + refundNote,
+                    "NO_SHOW",
+                    "/my-appointments");
+        }
+
+        if (appointment.getProviderId() != null) {
+            notifyProvider(appointment.getProviderId(), tenantId,
+                    terms.customer + " No-Show Recorded",
+                    terms.customer + " " + appointment.getPatientName() + " was marked as No-Show for scheduled " + terms.session.toLowerCase() + " on " + appointment.getAppointmentDate() + ".",
+                    "NO_SHOW",
+                    "/master-calendar");
+        }
+
+        if (tenantId != null) {
+            notifyTenantAdmin(tenantId,
+                    terms.session + " No-Show Recorded",
+                    terms.session + " #" + appointment.getId() + " (" + appointment.getPatientName() + ") was classified as No-Show. Settlement ledger synchronized.",
+                    "NO_SHOW",
                     "/admin/appointments?search=" + appointment.getId());
         }
     }

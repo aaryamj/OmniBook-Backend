@@ -28,4 +28,7 @@ public class ProviderProfile {
     private ProviderStatus status = ProviderStatus.SETUP_IN_PROGRESS;
 
     private String tier;
+
+    @Column(name = "commission_rate")
+    private Double commissionRate;
 }

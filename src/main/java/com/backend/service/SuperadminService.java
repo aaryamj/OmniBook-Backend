@@ -3,6 +3,7 @@ package com.backend.service;
 import com.backend.dto.OnboardClinicRequest;
 import com.backend.model.Tenant;
 import com.backend.model.User;
+import com.backend.model.SubscriptionOrder;
 import com.backend.repository.AppointmentRepository;
 import com.backend.repository.TenantRepository;
 import com.backend.repository.UserRepository;
@@ -31,6 +32,9 @@ public class SuperadminService {
     private final com.backend.repository.TenantRoleRepository tenantRoleRepository;
     private final com.backend.repository.PlatformInvoiceRepository platformInvoiceRepository;
     private final com.backend.repository.SupportTicketRepository supportTicketRepository;
+    private final RevenueAnalyticsService revenueAnalyticsService;
+    private final CommissionService commissionService;
+    private final com.backend.repository.SubscriptionExtensionRequestRepository subscriptionExtensionRequestRepository;
 
     @Transactional
     public String registerNewClinic(OnboardClinicRequest request) {
@@ -94,19 +98,6 @@ public class SuperadminService {
         return tenantRepository.countActiveClinics();
     }
 
-    private double calculateMRRAtDate(java.util.List<Tenant> tenants, LocalDateTime targetDate) {
-        double mrr = 0.0;
-        for (Tenant t : tenants) {
-            if ("ACTIVE".equalsIgnoreCase(t.getStatus()) && t.getCreatedAt() != null && !t.getCreatedAt().isAfter(targetDate)) {
-                String tier = t.getSubscriptionTier() != null ? t.getSubscriptionTier().toLowerCase() : "";
-                if (tier.contains("enterprise")) mrr += 30000.0;
-                else if (tier.contains("pro") || tier.contains("professional")) mrr += 15000.0;
-                else mrr += 5000.0;
-            }
-        }
-        return mrr;
-    }
-
     private LocalDateTime parseTimeFilter(String timeFilter) {
         if (timeFilter == null) return null;
         String normalized = timeFilter.trim().toLowerCase();
@@ -137,28 +128,49 @@ public class SuperadminService {
         
         long activeClinics = 0;
         long newClinicsThisWeek = 0;
-        double mrr = 0.0;
+        long activeSubscribers = 0;
+        long expiringSoonCount = 0;
+        long expiredCount = 0;
         
         LocalDateTime oneWeekAgo = LocalDateTime.now().minusDays(7);
+        java.time.LocalDate today = java.time.LocalDate.now();
+
+        java.util.List<Tenant> periodActiveTenants = new java.util.ArrayList<>();
 
         for (Tenant t : allTenants) {
-            // Apply time filter
-            if (startDate != null && t.getCreatedAt() != null && t.getCreatedAt().isBefore(startDate)) {
+            boolean matchesPeriod = (startDate == null);
+            if (!matchesPeriod) {
+                if (t.getCreatedAt() != null && !t.getCreatedAt().isBefore(startDate)) {
+                    matchesPeriod = true;
+                } else {
+                    SubscriptionOrder order = revenueAnalyticsService.getLatestValidSubscriptionOrder(t);
+                    if (order != null && order.getCreatedAt() != null && !order.getCreatedAt().isBefore(startDate)) {
+                        matchesPeriod = true;
+                    }
+                }
+            }
+
+            if (!matchesPeriod) {
                 continue;
             }
 
             if ("ACTIVE".equalsIgnoreCase(t.getStatus())) {
                 activeClinics++;
-                
-                if (t.getCreatedAt() != null && (startDate == null || !t.getCreatedAt().isAfter(LocalDateTime.now()))) {
-                    String tier = t.getSubscriptionTier() != null ? t.getSubscriptionTier().toLowerCase() : "";
-                    if (tier.contains("enterprise")) mrr += 30000.0;
-                    else if (tier.contains("pro") || tier.contains("professional")) mrr += 15000.0;
-                    else mrr += 5000.0;
-                }
-                
                 if (t.getCreatedAt() != null && t.getCreatedAt().isAfter(oneWeekAgo)) {
                     newClinicsThisWeek++;
+                }
+            }
+
+            java.time.LocalDate exp = t.getSubscriptionExpiryDate();
+            if ("ACTIVE".equalsIgnoreCase(t.getStatus()) || "ACTIVE".equalsIgnoreCase(t.getSubscriptionStatus())) {
+                activeSubscribers++;
+                periodActiveTenants.add(t);
+            }
+            if (exp != null) {
+                if (today.isAfter(exp) || "EXPIRED".equalsIgnoreCase(t.getSubscriptionStatus())) {
+                    expiredCount++;
+                } else if (java.time.temporal.ChronoUnit.DAYS.between(today, exp) <= 7) {
+                    expiringSoonCount++;
                 }
             }
         }
@@ -171,30 +183,29 @@ public class SuperadminService {
             totalPatientFootfall = appointmentRepository.count();
         }
 
-        LocalDateTime now = LocalDateTime.now();
-        java.util.List<Double> weekData = new java.util.ArrayList<>();
-        for (int i = 6; i >= 0; i--) {
-            weekData.add(calculateMRRAtDate(allTenants, now.minusDays(i)));
-        }
-
-        java.util.List<Double> monthData = new java.util.ArrayList<>();
-        for (int i = 3; i >= 0; i--) {
-            monthData.add(calculateMRRAtDate(allTenants, now.minusWeeks(i)));
-        }
-
-        java.util.List<Double> yearData = new java.util.ArrayList<>();
-        for (int i = 11; i >= 0; i--) {
-            yearData.add(calculateMRRAtDate(allTenants, now.minusMonths(i)));
-        }
-
-        java.util.Map<String, java.util.List<Double>> chartData = new java.util.HashMap<>();
-        chartData.put("1W", weekData);
-        chartData.put("1M", monthData);
-        chartData.put("1Y", yearData);
+        // Centralized source of truth revenue calculations (dynamic to selected timeframe)
+        double subscriptionMrr = (startDate == null) 
+                ? revenueAnalyticsService.calculateTotalMRR() 
+                : revenueAnalyticsService.calculateMRRForTenants(periodActiveTenants);
+        double subRevenue = revenueAnalyticsService.calculateSubscriptionRevenueBetween(startDate, null);
+        double commRevenue = revenueAnalyticsService.calculateAppointmentCommissionRevenueBetween(startDate, null);
+        double totalPlatformRevenue = revenueAnalyticsService.calculateTotalPlatformRevenueBetween(startDate, null);
+        double commissionRate = commissionService.getCurrentCommissionRate();
+        java.util.Map<String, java.util.List<Double>> chartData = revenueAnalyticsService.calculateHistoricalRevenueChartData();
+        long pendingExtensions = subscriptionExtensionRequestRepository.findByStatusOrderByCreatedAtDesc("PENDING").size();
 
         return SuperadminDashboardDTO.builder()
-                .mrr(mrr)
+                .mrr(subscriptionMrr)
+                .subscriptionMrr(subscriptionMrr)
+                .subscriptionRevenue(subRevenue)
+                .appointmentCommissionRevenue(commRevenue)
+                .totalPlatformRevenue(totalPlatformRevenue)
+                .commissionRate(commissionRate)
                 .activeClinics(activeClinics)
+                .activeSubscribers(activeSubscribers)
+                .expiringSoonCount(expiringSoonCount)
+                .expiredCount(expiredCount)
+                .pendingExtensionsCount(pendingExtensions)
                 .totalPatientFootfall(totalPatientFootfall)
                 .systemUptime(99.99)
                 .newClinicsThisWeek(newClinicsThisWeek)

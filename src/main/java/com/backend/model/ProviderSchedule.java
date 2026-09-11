@@ -39,4 +39,8 @@ public class ProviderSchedule {
     private LocalTime breakEndTime;
     
     private String closedMessage;
+
+    @Builder.Default
+    @Column(name = "is_closed_by_admin")
+    private Boolean isClosedByAdmin = false;
 }

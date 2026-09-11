@@ -65,6 +65,11 @@ public class SubscriptionOrder {
 
     private String invoiceNumber;
 
+    private Long tenantId;
+    private Long planId;
+    private java.time.LocalDate subscriptionStartDate;
+    private java.time.LocalDate subscriptionExpiryDate;
+
     private String transactionId; // Gateway paymentIntent / session ID / transaction UUID
     private String refundId; // Gateway refund ID
     @Column(columnDefinition = "TEXT")

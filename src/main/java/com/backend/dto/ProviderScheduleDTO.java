@@ -20,6 +20,10 @@ public class ProviderScheduleDTO {
     @com.fasterxml.jackson.annotation.JsonProperty("isTenantActive")
     @com.fasterxml.jackson.annotation.JsonAlias({"tenantActive", "isTenantActive", "is_tenant_active"})
     private Boolean isTenantActive;
+
+    @com.fasterxml.jackson.annotation.JsonProperty("isClosedByAdmin")
+    @com.fasterxml.jackson.annotation.JsonAlias({"closedByAdmin", "isClosedByAdmin", "is_closed_by_admin"})
+    private Boolean isClosedByAdmin;
     @com.fasterxml.jackson.annotation.JsonFormat(pattern = "HH:mm[:ss]")
     private LocalTime openingTime;
 

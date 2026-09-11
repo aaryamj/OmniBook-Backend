@@ -72,6 +72,23 @@ public class Tenant {
     @Column(columnDefinition = "varchar(255) default 'Enterprise'")
     private String subscriptionTier;
 
+    @Column(columnDefinition = "varchar(50) default 'ACTIVE'")
+    private String subscriptionStatus; // ACTIVE, EXPIRING_SOON, EXPIRED, SUSPENDED, RENEWAL_PENDING, CANCELLED
+
+    private java.time.LocalDate subscriptionStartDate;
+
+    private java.time.LocalDate subscriptionExpiryDate;
+
+    @Column(columnDefinition = "varchar(50) default 'Monthly'")
+    private String billingCycle;
+
+    @Column(columnDefinition = "int default 0")
+    private Integer emergencyExtensionDays;
+
+    private String lastSuspendedReason;
+
+    private String lastReminderDaysSent; // Comma-separated list of reminder thresholds sent, e.g. "7,3,1"
+
     // Security & Permissions fields
     @Column(columnDefinition = "boolean default false")
     private Boolean twoFactorEnabled;
@@ -81,4 +98,80 @@ public class Tenant {
 
     @Column(columnDefinition = "boolean default false")
     private Boolean requireHipaa;
+
+    // Cancellation & Refund Policy Configuration
+    @Builder.Default
+    @Column(columnDefinition = "boolean default true")
+    private Boolean cancellationAllowed = true;
+
+    @Builder.Default
+    @Column(columnDefinition = "int default 6")
+    private Integer cancellationDeadlineHours = 6;
+
+    @Builder.Default
+    @Column(columnDefinition = "int default 24")
+    private Integer fullRefundHours = 24;
+
+    @Builder.Default
+    @Column(columnDefinition = "double default 50.0")
+    private Double partialRefundPercentage = 50.0;
+
+    @Builder.Default
+    @Column(columnDefinition = "double default 0.0")
+    private Double lateRefundPercentage = 0.0;
+
+    // Rescheduling Policy Configuration
+    @Builder.Default
+    @Column(columnDefinition = "boolean default true")
+    private Boolean reschedulingAllowed = true;
+
+    @Builder.Default
+    @Column(columnDefinition = "int default 2")
+    private Integer maxReschedules = 2;
+
+    @Builder.Default
+    @Column(columnDefinition = "int default 6")
+    private Integer reschedulingDeadlineHours = 6;
+
+    @Builder.Default
+    @Column(columnDefinition = "boolean default true")
+    private Boolean autoProcessRefunds = true;
+
+    // No-Show Configuration
+    @Builder.Default
+    @Column(columnDefinition = "int default 15")
+    private Integer noShowGracePeriodMinutes = 15;
+
+    @Builder.Default
+    @Column(columnDefinition = "double default 0.0")
+    private Double noShowRefundPercentage = 0.0;
+
+    @Builder.Default
+    @Column(columnDefinition = "boolean default true")
+    private Boolean autoClassifyNoShow = true;
+
+    // Organization Commission Configuration
+    @Builder.Default
+    @Column(name = "default_commission_rate", columnDefinition = "double default 10.0")
+    private Double defaultCommissionRate = 10.0;
+
+    public String getName() {
+        return organizationName;
+    }
+
+    public void setName(String name) {
+        this.organizationName = name;
+    }
+
+    public boolean isActive() {
+        return "ACTIVE".equalsIgnoreCase(status);
+    }
+
+    public String getContactEmail() {
+        return legalBusinessName; // or fallback
+    }
+
+    public String getContactPhone() {
+        return phoneContact;
+    }
 }

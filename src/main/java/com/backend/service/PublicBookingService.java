@@ -170,9 +170,9 @@ public class PublicBookingService {
         }
 
         LocalTime currentTime = openingTime;
-        DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern("h:mm a");
-        DateTimeFormatter time24Formatter = DateTimeFormatter.ofPattern("HH:mm");
-        DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("MMM d, yyyy");
+        DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern("h:mm a", Locale.ENGLISH);
+        DateTimeFormatter time24Formatter = DateTimeFormatter.ofPattern("HH:mm", Locale.ENGLISH);
+        DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.ENGLISH);
 
         int slotIndex = 0;
         while (currentTime.plusMinutes(durationMinutes).isBefore(closingTime) || currentTime.plusMinutes(durationMinutes).equals(closingTime)) {

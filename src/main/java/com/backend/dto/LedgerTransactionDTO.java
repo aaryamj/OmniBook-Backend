@@ -25,4 +25,14 @@ public class LedgerTransactionDTO {
     private String status;
     private String statusColor;
     private String statusDot;
+    private Double commissionRate;
+    private Double platformFee;
+    private Double netAmount;
+    private Double grossAmount;
+    private Double refundAmount;
+    private Double netRetainedAmount;
+    private Double gatewayFee;
+    private Double remainingOrgAmount;
+    private Double providerSettlement;
+    private Double orgAdminSettlement;
 }

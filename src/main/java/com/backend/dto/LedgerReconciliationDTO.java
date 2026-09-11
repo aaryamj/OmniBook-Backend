@@ -11,6 +11,7 @@ import java.util.List;
 @NoArgsConstructor
 @AllArgsConstructor
 public class LedgerReconciliationDTO {
+    private Double commissionRate;
     private Double grossVolumeUSD;
     private Double grossVolumeNPR;
     private Double stripeEscrow;

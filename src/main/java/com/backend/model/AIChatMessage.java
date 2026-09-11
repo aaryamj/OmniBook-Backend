@@ -32,6 +32,8 @@ public class AIChatMessage {
 
     private String actionSlotId;
 
+    private String actionType;
+
     @Builder.Default
     private Boolean isSummarized = false; // true if folded into AIConversation.summary
 

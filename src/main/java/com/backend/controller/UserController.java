@@ -124,6 +124,7 @@ public class UserController {
             List<Map<String, Object>> responseList = appointments.stream().map(app -> {
                 Map<String, Object> map = new HashMap<>();
                 map.put("id", app.getId());
+                map.put("providerId", app.getProviderId());
                 map.put("serviceName", app.getServiceName());
                 map.put("appointmentDate", app.getAppointmentDate());
                 map.put("appointmentTime", app.getAppointmentTime());
@@ -231,6 +232,45 @@ public class UserController {
                 map.put("cancelledAt", app.getCancelledAt());
                 map.put("cancelledByName", app.getCancelledByName());
                 map.put("cancelledByRole", app.getCancelledByRole());
+                map.put("cancellationReason", app.getCancellationReason());
+
+                // Rescheduling fields
+                map.put("rescheduleCount", app.getRescheduleCount() != null ? app.getRescheduleCount() : 0);
+                map.put("originalAppointmentDate", app.getOriginalAppointmentDate());
+                map.put("originalAppointmentTime", app.getOriginalAppointmentTime());
+                map.put("rescheduledAt", app.getRescheduledAt());
+                map.put("rescheduledByName", app.getRescheduledByName());
+                map.put("rescheduledByRole", app.getRescheduledByRole());
+
+                // Payment & Refund fields
+                map.put("paymentMethod", app.getPaymentMethod());
+                map.put("paymentStatus", app.getPaymentStatus());
+                map.put("chargedAmount", app.getChargedAmount());
+                map.put("chargedCurrency", app.getChargedCurrency());
+                map.put("exchangeRate", app.getExchangeRate());
+                map.put("originalNprAmount", app.getBasePriceNpr() != null ? app.getBasePriceNpr() : app.getPrice());
+                map.put("gatewayPaymentRef", app.getGatewayPaymentRef());
+
+                map.put("refundStatus", app.getRefundStatus());
+                map.put("refundEligibilityPercentage", app.getRefundEligibilityPercentage());
+                map.put("refundAmount", app.getRefundAmount());
+                map.put("refundCurrency", app.getRefundCurrency());
+                map.put("refundTransactionId", app.getRefundTransactionId());
+                map.put("refundRequestedAt", app.getRefundRequestedAt());
+                map.put("refundedAt", app.getRefundedAt());
+                map.put("refundFailureReason", app.getRefundFailureReason());
+
+                // Tenant Policy snapshot
+                Map<String, Object> policyMap = new HashMap<>();
+                policyMap.put("cancellationAllowed", appTenant != null && appTenant.getCancellationAllowed() != null ? appTenant.getCancellationAllowed() : true);
+                policyMap.put("cancellationDeadlineHours", appTenant != null && appTenant.getCancellationDeadlineHours() != null ? appTenant.getCancellationDeadlineHours() : 6);
+                policyMap.put("fullRefundHours", appTenant != null && appTenant.getFullRefundHours() != null ? appTenant.getFullRefundHours() : 24);
+                policyMap.put("partialRefundPercentage", appTenant != null && appTenant.getPartialRefundPercentage() != null ? appTenant.getPartialRefundPercentage() : 50.0);
+                policyMap.put("lateRefundPercentage", appTenant != null && appTenant.getLateRefundPercentage() != null ? appTenant.getLateRefundPercentage() : 0.0);
+                policyMap.put("reschedulingAllowed", appTenant != null && appTenant.getReschedulingAllowed() != null ? appTenant.getReschedulingAllowed() : true);
+                policyMap.put("maxReschedules", appTenant != null && appTenant.getMaxReschedules() != null ? appTenant.getMaxReschedules() : 2);
+                policyMap.put("reschedulingDeadlineHours", appTenant != null && appTenant.getReschedulingDeadlineHours() != null ? appTenant.getReschedulingDeadlineHours() : 6);
+                map.put("tenantPolicy", policyMap);
 
                 return map;
             }).collect(Collectors.toList());

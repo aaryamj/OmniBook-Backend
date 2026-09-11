@@ -20,6 +20,7 @@ import com.backend.dto.ProviderDTO;
 import com.backend.dto.AdminAppointmentDTO;
 
 import com.backend.model.Tenant;
+import com.backend.model.SubscriptionPlan;
 import com.backend.repository.TenantRepository;
 import com.backend.repository.AppointmentRepository;
 import com.backend.model.Appointment;
@@ -51,6 +52,18 @@ public class AdminService {
     private final NotificationService notificationService;
     private final org.springframework.security.crypto.password.PasswordEncoder passwordEncoder;
     private final com.backend.repository.ProviderServiceRepository providerServiceRepository;
+    private final CommissionService commissionService;
+    private final SubscriptionPlanService subscriptionPlanService;
+
+    public void checkSubscriptionAccess(Tenant tenant) {
+        if (tenant == null) return;
+        if ("EXPIRED".equalsIgnoreCase(tenant.getSubscriptionStatus()) || "SUSPENDED".equalsIgnoreCase(tenant.getSubscriptionStatus())) {
+            throw new RuntimeException("Your organization's subscription is " + tenant.getSubscriptionStatus().toLowerCase() + ". Feature access is paused until renewal or emergency extension.");
+        }
+        if (tenant.getSubscriptionExpiryDate() != null && java.time.LocalDate.now().isAfter(tenant.getSubscriptionExpiryDate())) {
+            throw new RuntimeException("Your organization's subscription expired on " + tenant.getSubscriptionExpiryDate() + ". Renewal is required to continue.");
+        }
+    }
 
     public void inviteProvider(InviteProviderRequest request, String adminEmail) {
         User admin = userRepository.findByEmail(adminEmail)
@@ -60,13 +73,10 @@ public class AdminService {
             throw new RuntimeException("Your account is not associated with any clinic. You cannot invite providers.");
         }
 
-        String tier = admin.getTenant().getSubscriptionTier();
-        int maxProviders = -1;
-        if (tier != null) {
-            String t = tier.toLowerCase();
-            if (t.contains("starter")) maxProviders = 5;
-            else if (t.contains("pro") || t.contains("professional")) maxProviders = 20;
-        }
+        checkSubscriptionAccess(admin.getTenant());
+
+        SubscriptionPlan plan = subscriptionPlanService.getPlanEntityByName(admin.getTenant().getSubscriptionTier());
+        int maxProviders = plan != null && plan.getUserLimit() != null ? plan.getUserLimit() : -1;
 
         if (maxProviders != -1) {
             long currentProviders = userRepository.findByTenantIdAndRole(admin.getTenant().getId(), "service_provider").size();
@@ -150,6 +160,10 @@ public class AdminService {
 
             double thisWeekTotal = thisWeekStripe + thisWeekEsewa;
 
+            Double customRate = profile != null ? profile.getCommissionRate() : null;
+            Double orgDefaultRate = admin.getTenant().getDefaultCommissionRate() != null ? admin.getTenant().getDefaultCommissionRate() : 10.0;
+            Double effectiveRate = (customRate != null && customRate >= 0.0) ? customRate : orgDefaultRate;
+
             return ProviderDTO.builder()
                     .id(user.getId())
                     .name(user.getFullName())
@@ -166,6 +180,8 @@ public class AdminService {
                     .thisWeekStripe(thisWeekStripe)
                     .thisWeekEsewa(thisWeekEsewa)
                     .totalEarnings(totalEarnings)
+                    .commissionRate(customRate)
+                    .effectiveCommissionRate(effectiveRate)
                     .build();
         }).collect(Collectors.toList());
     }
@@ -274,6 +290,41 @@ public class AdminService {
         log.info("Provider {} reactivated by Admin {}", provider.getEmail(), adminEmail);
         auditLogService.logAction(admin, "Reactivated Provider: " + provider.getFullName(), "127.0.0.1");
     }
+
+    public void updateProviderCommission(Long providerUserId, Double commissionRate, String adminEmail) {
+        User admin = userRepository.findByEmail(adminEmail)
+                .orElseThrow(() -> new RuntimeException("Admin not found"));
+
+        if (admin.getTenant() == null) {
+            throw new RuntimeException("Admin has no tenant associated");
+        }
+
+        User provider = userRepository.findById(providerUserId)
+                .orElseThrow(() -> new RuntimeException("Provider not found with id " + providerUserId));
+
+        if (provider.getTenant() == null || !provider.getTenant().getId().equals(admin.getTenant().getId())) {
+            throw new RuntimeException("Provider does not belong to your organization");
+        }
+
+        if (commissionRate != null && (commissionRate < 0.0 || commissionRate > 100.0)) {
+            throw new RuntimeException("Commission percentage must be between 0% and 100%");
+        }
+
+        ProviderProfile profile = providerProfileRepository.findByUser(provider)
+                .orElseGet(() -> {
+                    ProviderProfile newProfile = new ProviderProfile();
+                    newProfile.setUser(provider);
+                    return newProfile;
+                });
+
+        profile.setCommissionRate(commissionRate);
+        providerProfileRepository.save(profile);
+
+        log.info("Updated commission rate for provider {} (user ID {}) to {}% by admin {}",
+                provider.getFullName(), providerUserId, commissionRate, adminEmail);
+        auditLogService.logAction(admin, "Updated commission rate for provider: " + provider.getFullName() + " to " + (commissionRate != null ? commissionRate + "%" : "Org Default"), "127.0.0.1");
+    }
+
     public AdminDashboardStatsDTO getDashboardStats(String adminEmail) {
         User admin = userRepository.findByEmail(adminEmail)
                 .orElseThrow(() -> new RuntimeException("Admin not found"));
@@ -542,6 +593,8 @@ public class AdminService {
             throw new RuntimeException("Admin is not associated with any clinic.");
         }
 
+        checkSubscriptionAccess(admin.getTenant());
+
         Appointment appointment = appointmentRepository.findById(appointmentId)
                 .orElseThrow(() -> new RuntimeException("Appointment not found"));
 
@@ -565,6 +618,11 @@ public class AdminService {
             appointment.setCompletedByName(admin.getFullName() != null ? admin.getFullName() : admin.getEmail());
             appointment.setCompletedByRole(admin.getTenantRole() != null ? admin.getTenantRole().getRoleName() : admin.getRole());
             appointment.setCompletedByUserId(admin.getId());
+            try {
+                commissionService.recordAppointmentCommission(appointment, appointment.getPaymentStatus());
+            } catch (Exception commEx) {
+                log.warn("Failed to record commission on completion: {}", commEx.getMessage());
+            }
         } else if ("CANCELLED".equals(status)) {
             appointment.setCancelledAt(java.time.LocalDateTime.now());
             appointment.setCancelledByName(admin.getFullName() != null ? admin.getFullName() : admin.getEmail());
@@ -818,6 +876,8 @@ public class AdminService {
             throw new RuntimeException("Admin is not associated with any organization.");
         }
 
+        checkSubscriptionAccess(admin.getTenant());
+
         // 1. Find provider by ID or flexible Name
         User provider = null;
         if (request.getProviderId() != null) {
@@ -1007,6 +1067,14 @@ public class AdminService {
             savedAppointment = appointmentRepository.save(appBuilder.build());
         }
 
+        if ("SUCCESS".equalsIgnoreCase(savedAppointment.getPaymentStatus()) || "PAID".equalsIgnoreCase(savedAppointment.getPaymentStatus())) {
+            try {
+                commissionService.recordAppointmentCommission(savedAppointment, savedAppointment.getPaymentStatus());
+            } catch (Exception commEx) {
+                log.warn("Failed to record walk-in appointment commission: {}", commEx.getMessage());
+            }
+        }
+
         // Dispatch notifications for new walk-in / created appointment
         try {
             notificationService.notifyBookingConfirmed(savedAppointment);
@@ -1035,6 +1103,9 @@ public class AdminService {
             appointments = appointmentRepository.findByTenantId(admin.getTenant().getId());
         }
 
+        double commissionRate = commissionService.getCurrentCommissionRate();
+        double commissionFraction = commissionRate / 100.0;
+
         double grossVolumeUSD = 0.0;
         double grossVolumeNPR = 0.0;
         double stripeEscrow = 0.0;
@@ -1061,50 +1132,124 @@ public class AdminService {
             boolean isEsewa = "ESEWA".equalsIgnoreCase(a.getPaymentMethod());
             double price = a.getPrice() != null ? a.getPrice() : 0.0;
             
-            // Calculate KPIs
-            if ("SUCCESS".equalsIgnoreCase(a.getPaymentStatus()) || "SETTLED".equalsIgnoreCase(a.getPaymentStatus())) {
+            double effectiveStripeUsd = a.getChargedAmount() != null ? a.getChargedAmount()
+                    : (a.getExchangeRate() != null && a.getExchangeRate() > 0 ? (price / a.getExchangeRate()) : (price / 135.0));
+            effectiveStripeUsd = Math.round(effectiveStripeUsd * 100.0) / 100.0;
+
+            double grossBookingAmount = isStripe ? effectiveStripeUsd : price;
+            double refundAmount = a.getRefundAmount() != null ? a.getRefundAmount() : 0.0;
+            
+            // 1. Net Retained Amount = Gross Booking Amount - Refund Amount
+            double netRetained;
+            if (a.getNetRetainedAmount() != null) {
+                netRetained = a.getNetRetainedAmount();
+            } else if (refundAmount > 0) {
+                netRetained = Math.max(0.0, Math.round((grossBookingAmount - refundAmount) * 100.0) / 100.0);
+            } else if ("REFUNDED".equalsIgnoreCase(a.getPaymentStatus()) || "REFUNDED".equalsIgnoreCase(a.getRefundStatus())) {
+                netRetained = 0.0;
+            } else {
+                netRetained = grossBookingAmount;
+            }
+
+            // 2. Platform Commission = Net Retained Amount × Platform Commission %
+            double platformFee = Math.round((netRetained * commissionFraction) * 100.0) / 100.0;
+
+            // 3. Applicable Gateway Fees
+            double gatewayFee = a.getGatewayFeeAmount() != null 
+                    ? a.getGatewayFeeAmount() 
+                    : commissionService.calculateGatewayFee(a.getPaymentMethod(), netRetained);
+
+            // 4. Gross Remaining Organization Amount = Net Retained Amount - Platform Commission - Applicable Gateway Fees
+            double remainingOrg;
+            if (a.getRemainingOrgAmount() != null) {
+                remainingOrg = a.getRemainingOrgAmount();
+            } else {
+                remainingOrg = Math.max(0.0, Math.round((netRetained - platformFee - gatewayFee) * 100.0) / 100.0);
+            }
+
+            // 5. Net Service Provider
+            double providerSettlement;
+            if (a.getOrgSettlementAmount() != null && a.getSettlementAmount() != null) {
+                providerSettlement = a.getSettlementAmount();
+            } else {
+                double provRate = commissionService.resolveCommissionRate(a.getProviderId(), a.getTenantId());
+                providerSettlement = Math.round((remainingOrg * (provRate / 100.0)) * 100.0) / 100.0;
+            }
+
+            // 6. Net Organization Admin
+            double orgAdminSettlement;
+            if (a.getOrgSettlementAmount() != null) {
+                orgAdminSettlement = a.getOrgSettlementAmount();
+            } else {
+                orgAdminSettlement = Math.max(0.0, Math.round((remainingOrg - providerSettlement) * 100.0) / 100.0);
+            }
+
+            // Map Status & Colors
+            String rawPaymentStatus = a.getPaymentStatus() != null ? a.getPaymentStatus() : "PENDING";
+            String rawSettlementStatus = a.getSettlementStatus() != null ? a.getSettlementStatus() : "";
+            String status;
+            String statusColor;
+            String statusDot;
+
+            boolean isRefunded = (netRetained == 0.0 && (refundAmount > 0 || "REFUNDED".equalsIgnoreCase(rawPaymentStatus)));
+            boolean isPartiallyRefunded = (refundAmount > 0 && netRetained > 0) 
+                    || "PARTIALLY_REFUNDED".equalsIgnoreCase(rawPaymentStatus) 
+                    || "ADJUSTED_REFUND".equalsIgnoreCase(rawSettlementStatus);
+            boolean isSettled = "SUCCESS".equalsIgnoreCase(rawPaymentStatus) 
+                    || "SETTLED".equalsIgnoreCase(rawPaymentStatus) 
+                    || "NO_SHOW_SETTLED".equalsIgnoreCase(rawPaymentStatus);
+
+            if (isRefunded) {
+                status = "Refunded";
+                statusColor = "text-on-surface-variant bg-surface-container-low border-outline-variant";
+                statusDot = "bg-outline";
+            } else if (isPartiallyRefunded) {
+                status = "Partially Refunded";
+                statusColor = "text-amber-700 bg-amber-50 border-amber-200";
+                statusDot = "bg-amber-500";
                 if (isStripe) {
-                    grossVolumeUSD += price;
-                    platformFeesUSD += price * 0.02;
+                    grossVolumeUSD += netRetained;
+                    platformFeesUSD += platformFee;
                 } else if (isEsewa) {
-                    grossVolumeNPR += price;
-                    esewaSettled += price;
-                    platformFeesNPR += price * 0.02;
+                    grossVolumeNPR += netRetained;
+                    esewaSettled += netRetained;
+                    platformFeesNPR += platformFee;
                 }
-            } else if ("PENDING".equalsIgnoreCase(a.getPaymentStatus()) || "IN ESCROW".equalsIgnoreCase(a.getPaymentStatus())) {
+            } else if (isSettled) {
+                status = "NO_SHOW_SETTLED".equalsIgnoreCase(rawPaymentStatus) ? "No-Show Settled" : "Settled";
+                statusColor = "text-green-600 bg-green-50 border-green-100";
+                statusDot = "bg-green-500";
                 if (isStripe) {
-                    stripeEscrow += price;
+                    grossVolumeUSD += netRetained;
+                    platformFeesUSD += platformFee;
+                } else if (isEsewa) {
+                    grossVolumeNPR += netRetained;
+                    esewaSettled += netRetained;
+                    platformFeesNPR += platformFee;
                 }
+            } else if ("PENDING".equalsIgnoreCase(rawPaymentStatus) || "IN ESCROW".equalsIgnoreCase(rawPaymentStatus)) {
+                status = "In Escrow";
+                statusColor = "text-amber-600 bg-amber-50 border-amber-100";
+                statusDot = "bg-amber-500";
+                if (isStripe) {
+                    stripeEscrow += netRetained;
+                }
+            } else {
+                status = rawPaymentStatus;
+                statusColor = "text-on-surface-variant bg-surface-container-low border-outline-variant";
+                statusDot = "bg-outline";
             }
             
             // Calculate Chart Data
             if (a.getAppointmentDate() != null) {
                 java.time.LocalDate apptDate = a.getAppointmentDate();
                 if (!apptDate.isBefore(today.minusDays(6)) && !apptDate.isAfter(today)) {
-                    if (isStripe && ("SUCCESS".equalsIgnoreCase(a.getPaymentStatus()) || "PENDING".equalsIgnoreCase(a.getPaymentStatus()))) {
-                        stripeDaily.put(apptDate, stripeDaily.getOrDefault(apptDate, 0.0) + price);
-                    } else if (isEsewa && "SUCCESS".equalsIgnoreCase(a.getPaymentStatus())) {
-                        esewaDaily.put(apptDate, esewaDaily.getOrDefault(apptDate, 0.0) + price);
+                    if (isStripe && (isSettled || isPartiallyRefunded || "PENDING".equalsIgnoreCase(rawPaymentStatus))) {
+                        stripeDaily.put(apptDate, stripeDaily.getOrDefault(apptDate, 0.0) + netRetained);
+                    } else if (isEsewa && (isSettled || isPartiallyRefunded)) {
+                        esewaDaily.put(apptDate, esewaDaily.getOrDefault(apptDate, 0.0) + netRetained);
                     }
                 }
-            }
-            
-            // Map Transaction DTO
-            String status = a.getPaymentStatus();
-            String statusColor = "text-on-surface-variant bg-surface-container-low border-outline-variant";
-            String statusDot = "bg-outline";
-            if ("SUCCESS".equalsIgnoreCase(status) || "SETTLED".equalsIgnoreCase(status)) {
-                status = "Settled";
-                statusColor = "text-green-600 bg-green-50 border-green-100";
-                statusDot = "bg-green-500";
-            } else if ("PENDING".equalsIgnoreCase(status) || "IN ESCROW".equalsIgnoreCase(status)) {
-                status = "In Escrow";
-                statusColor = "text-amber-600 bg-amber-50 border-amber-100";
-                statusDot = "bg-amber-500";
-            } else if ("FAILED".equalsIgnoreCase(status) || "REFUNDED".equalsIgnoreCase(status)) {
-                status = "Refunded";
-                statusColor = "text-on-surface-variant bg-surface-container-low border-outline-variant";
-                statusDot = "bg-outline";
             }
 
             String initials = "XX";
@@ -1140,11 +1285,21 @@ public class AdminService {
                     .patientColor(bgColors[colorIndex])
                     .gateway(isStripe ? "Stripe" : (isEsewa ? "eSewa" : (a.getPaymentMethod() != null ? a.getPaymentMethod() : "CASH")))
                     .gatewayColor(isStripe ? "bg-primary text-white" : (isEsewa ? "bg-green-600 text-white" : "bg-gray-600 text-white"))
-                    .amount((isStripe ? "$" : "Rs. ") + price)
-                    .accountType(isStripe ? "USD Account" : "NPR Wallet")
+                    .amount(isStripe ? String.format("$%.2f", grossBookingAmount) : ("Rs. " + String.format("%.0f", grossBookingAmount)))
+                    .accountType(isStripe ? ("USD Account (Rate: " + String.format("%.1f", a.getExchangeRate() != null ? a.getExchangeRate() : 135.0) + " NPR/$)") : "NPR Wallet")
                     .status(status)
                     .statusColor(statusColor)
                     .statusDot(statusDot)
+                    .commissionRate(commissionRate)
+                    .platformFee(platformFee)
+                    .netAmount(providerSettlement)
+                    .grossAmount(grossBookingAmount)
+                    .refundAmount(refundAmount)
+                    .netRetainedAmount(netRetained)
+                    .gatewayFee(gatewayFee)
+                    .remainingOrgAmount(remainingOrg)
+                    .providerSettlement(providerSettlement)
+                    .orgAdminSettlement(orgAdminSettlement)
                     .build());
         }
 
@@ -1178,6 +1333,7 @@ public class AdminService {
         }
 
         return com.backend.dto.LedgerReconciliationDTO.builder()
+                .commissionRate(commissionRate)
                 .grossVolumeUSD(grossVolumeUSD)
                 .grossVolumeNPR(grossVolumeNPR)
                 .stripeEscrow(stripeEscrow)
@@ -1207,6 +1363,11 @@ public class AdminService {
             if ("PENDING".equalsIgnoreCase(a.getPaymentStatus()) || "IN ESCROW".equalsIgnoreCase(a.getPaymentStatus())) {
                 a.setPaymentStatus("SUCCESS");
                 appointmentRepository.save(a);
+                try {
+                    commissionService.recordAppointmentCommission(a, "SUCCESS");
+                } catch (Exception commEx) {
+                    log.warn("Failed to record settlement commission: {}", commEx.getMessage());
+                }
             }
         }
     }

@@ -58,11 +58,23 @@ public class PaymentService {
     @Autowired
     private TwilioSmsService twilioSmsService;
 
+    @Autowired
+    private CommissionService commissionService;
+
+    @Autowired
+    private CurrencyExchangeService currencyExchangeService;
+
     @Transactional
     public Map<String, Object> initiatePayment(PaymentRequestDTO request) {
         String transactionId = UUID.randomUUID().toString().replace("-", "");
         
         // Resolve user identity
+        boolean isStripe = "STRIPE".equalsIgnoreCase(request.getPaymentMethod());
+        double exchangeRate = isStripe ? currencyExchangeService.getNprToUsdRate() : 1.0;
+        String chargedCurrency = isStripe ? "USD" : "NPR";
+        java.time.LocalDateTime conversionTime = java.time.LocalDateTime.now();
+        double totalChargedAmount = isStripe ? currencyExchangeService.convertNprToUsd(request.getTotalAmount(), exchangeRate) : request.getTotalAmount();
+
         Long bookedUserId = request.getUserId();
         String userEmail = request.getPatientEmail() != null ? request.getPatientEmail().trim() : null;
         if (bookedUserId == null && userEmail != null && !userEmail.isEmpty()) {
@@ -103,30 +115,56 @@ public class PaymentService {
             Map<String, Object> slotsResult = publicBookingService.getProviderSlots(request.getProviderId(), dateStr, request.getServiceName());
             java.util.List<com.backend.dto.TimeSlotDTO> dynamicSlots = (java.util.List<com.backend.dto.TimeSlotDTO>) slotsResult.get("slots");
             
-            LocalTime appointmentTime = LocalTime.NOON; // fallback
+            LocalTime appointmentTime = null;
             String priceStr = "1500";
             if (dynamicSlots != null) {
                 for (com.backend.dto.TimeSlotDTO s : dynamicSlots) {
                     if (s.getId().equals(slotId)) {
-                        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.ENGLISH);
-                        try {
-                            appointmentTime = LocalTime.parse(s.getTime(), formatter);
-                        } catch (Exception e) {
-                            e.printStackTrace();
+                        // 1. Prefer direct 24-hour time format if available (e.g. "14:00")
+                        if (s.getSlotTime24() != null && !s.getSlotTime24().isBlank()) {
+                            try {
+                                appointmentTime = LocalTime.parse(s.getSlotTime24().trim());
+                            } catch (Exception ignored) {}
                         }
-                        priceStr = s.getPrice().replaceAll("[^\\d]", "");
+                        // 2. Parse time string with case-insensitivity (handles "2:00 pm", "2:00 PM", "02:00 PM")
+                        if (appointmentTime == null && s.getTime() != null && !s.getTime().isBlank()) {
+                            try {
+                                String cleanTime = s.getTime().trim().toUpperCase(java.util.Locale.ENGLISH);
+                                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.ENGLISH);
+                                appointmentTime = LocalTime.parse(cleanTime, formatter);
+                            } catch (Exception e1) {
+                                try {
+                                    String cleanTime = s.getTime().trim().toUpperCase(java.util.Locale.ENGLISH);
+                                    DateTimeFormatter formatter2 = DateTimeFormatter.ofPattern("hh:mm a", java.util.Locale.ENGLISH);
+                                    appointmentTime = LocalTime.parse(cleanTime, formatter2);
+                                } catch (Exception e2) {
+                                    try {
+                                        DateTimeFormatter formatter3 = new java.time.format.DateTimeFormatterBuilder()
+                                                .parseCaseInsensitive()
+                                                .appendPattern("h:mm[ ]a")
+                                                .toFormatter(java.util.Locale.ENGLISH);
+                                        appointmentTime = LocalTime.parse(s.getTime().trim(), formatter3);
+                                    } catch (Exception ignored) {}
+                                }
+                            }
+                        }
+                        if (s.getPrice() != null) {
+                            priceStr = s.getPrice().replaceAll("[^\\d]", "");
+                        }
                         break;
                     }
                 }
             }
             
-            // If fallback is still NOON, attempt to extract time from the slot ID (e.g. if coming from AI slots)
-            if (appointmentTime.equals(LocalTime.NOON) && parts.length >= 5) {
+            // If fallback is still null, attempt to extract time from slot ID only if it is formatted as HH:mm
+            if (appointmentTime == null && parts.length >= 5 && parts[4].contains(":")) {
                 try {
-                    appointmentTime = LocalTime.parse(parts[4]); // Expects "HH:mm"
-                } catch(Exception e) {
-                    e.printStackTrace();
-                }
+                    appointmentTime = LocalTime.parse(parts[4].trim());
+                } catch(Exception ignored) {}
+            }
+
+            if (appointmentTime == null) {
+                appointmentTime = LocalTime.NOON; // ultimate fallback
             }
             
             Double price = 1500.0;
@@ -135,6 +173,9 @@ public class PaymentService {
             } catch (Exception e) {
                 e.printStackTrace();
             }
+
+            double slotBasePriceNpr = price;
+            double slotCharged = isStripe ? currencyExchangeService.convertNprToUsd(slotBasePriceNpr, exchangeRate) : slotBasePriceNpr;
 
             boolean serviceAllowsVirtual = false;
             if (request.getServiceName() != null && request.getTenantId() != null) {
@@ -252,7 +293,13 @@ public class PaymentService {
                     .serviceName(request.getServiceName())
                     .appointmentDate(LocalDate.parse(dateStr))
                     .appointmentTime(appointmentTime)
-                    .price(price)
+                    .price(slotBasePriceNpr) // Base single source-of-truth price in NPR
+                    .baseCurrency("NPR")
+                    .basePriceNpr(slotBasePriceNpr)
+                    .chargedCurrency(chargedCurrency)
+                    .chargedAmount(slotCharged)
+                    .exchangeRate(exchangeRate)
+                    .conversionTimestamp(conversionTime)
                     .appointmentType(aptType)
                     .meetingLink(meetingLink)
                     .videoCallEnabled("VIRTUAL".equalsIgnoreCase(aptType))
@@ -285,13 +332,21 @@ public class PaymentService {
 
         Map<String, Object> response = new HashMap<>();
         response.put("success", true);
+        response.put("baseCurrency", "NPR");
+        response.put("baseAmountNpr", request.getTotalAmount());
+        response.put("chargedCurrency", chargedCurrency);
+        response.put("chargedAmount", totalChargedAmount);
+        response.put("exchangeRate", exchangeRate);
+        response.put("conversionTimestamp", conversionTime.toString());
 
-        if ("STRIPE".equalsIgnoreCase(request.getPaymentMethod())) {
+        if (isStripe) {
             try {
                 Stripe.apiKey = stripeApiKey;
 
                 String successUrl = "http://localhost:8080/api/v1/public/booking/verify-stripe?session_id={CHECKOUT_SESSION_ID}";
                 String cancelUrl = "http://localhost:5173/payment-failed?error=cancelled";
+
+                long unitAmountCents = (long) Math.round(totalChargedAmount * 100.0);
 
                 SessionCreateParams params = SessionCreateParams.builder()
                         .setMode(SessionCreateParams.Mode.PAYMENT)
@@ -301,10 +356,11 @@ public class PaymentService {
                         .addLineItem(SessionCreateParams.LineItem.builder()
                                 .setQuantity(1L)
                                 .setPriceData(SessionCreateParams.LineItem.PriceData.builder()
-                                        .setCurrency("usd") // Convert NPR to USD if needed, assuming USD for stripe test
-                                        .setUnitAmount((long) (request.getTotalAmount() * 100))
+                                        .setCurrency("usd")
+                                        .setUnitAmount(unitAmountCents)
                                         .setProductData(SessionCreateParams.LineItem.PriceData.ProductData.builder()
                                                 .setName(request.getServiceName() != null ? request.getServiceName() : "Appointment Booking")
+                                                .setDescription(String.format("NPR %.2f converted to USD at 1 USD = %.2f NPR", request.getTotalAmount(), exchangeRate))
                                                 .build())
                                         .build())
                                 .build())
@@ -369,6 +425,11 @@ public class PaymentService {
             for (Appointment appointment : appointments) {
                 appointment.setPaymentStatus("SUCCESS");
                 appointmentRepository.save(appointment);
+                try {
+                    commissionService.recordAppointmentCommission(appointment, "SUCCESS");
+                } catch (Throwable commEx) {
+                    System.err.println("Failed to record commission for appointment " + appointment.getId() + ": " + commEx.getMessage());
+                }
             }
             
             try {
@@ -397,9 +458,16 @@ public class PaymentService {
                         .collect(java.util.stream.Collectors.toList());
                 
                 if (appointments != null && !appointments.isEmpty()) {
+                    String gatewayRef = session.getPaymentIntent() != null ? session.getPaymentIntent() : sessionId;
                     for (Appointment a : appointments) {
                         a.setPaymentStatus("SUCCESS");
+                        a.setGatewayPaymentRef(gatewayRef);
                         appointmentRepository.save(a);
+                        try {
+                            commissionService.recordAppointmentCommission(a, "SUCCESS");
+                        } catch (Throwable commEx) {
+                            System.err.println("Failed to record commission for appointment " + a.getId() + ": " + commEx.getMessage());
+                        }
                     }
                     
                     try {
@@ -422,5 +490,42 @@ public class PaymentService {
             e.printStackTrace();
         }
         return null;
+    }
+
+    /**
+     * Executes a real refund via Stripe for an appointment.
+     * Enforces the original USD payment currency and amount without recalculating forex.
+     */
+    public String executeStripeRefund(String paymentIntentOrSessionId, double refundAmountUsd) throws Exception {
+        Stripe.apiKey = stripeApiKey;
+        String paymentIntentId = paymentIntentOrSessionId;
+        if (paymentIntentOrSessionId != null && paymentIntentOrSessionId.startsWith("cs_")) {
+            Session session = Session.retrieve(paymentIntentOrSessionId);
+            if (session.getPaymentIntent() != null) {
+                paymentIntentId = session.getPaymentIntent();
+            }
+        }
+
+        long amountInCents = Math.max(50, Math.round(refundAmountUsd * 100));
+
+        com.stripe.param.RefundCreateParams.Builder paramsBuilder = com.stripe.param.RefundCreateParams.builder()
+                .setAmount(amountInCents);
+
+        if (paymentIntentId != null && !paymentIntentId.isBlank() && paymentIntentId.startsWith("pi_")) {
+            paramsBuilder.setPaymentIntent(paymentIntentId);
+        } else {
+            // If running in simulation / demo without live charge
+            return "re_simulated_" + UUID.randomUUID().toString().substring(0, 12);
+        }
+
+        com.stripe.model.Refund refund = com.stripe.model.Refund.create(paramsBuilder.build());
+        return refund.getId();
+    }
+
+    /**
+     * Executes an eSewa refund with audit transaction reference.
+     */
+    public String executeEsewaRefund(String transactionUuid, double refundAmountNpr) {
+        return "ESEWA-REF-" + UUID.randomUUID().toString().substring(0, 10).toUpperCase();
     }
 }

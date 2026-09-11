@@ -71,6 +71,10 @@ public class PlatformSetting {
     private String nextInvoiceDate;
     private String billingContactEmail;
 
+    @Column(columnDefinition = "double default 10.0")
+    @Builder.Default
+    private Double appointmentCommissionRate = 10.0;
+
     private LocalDateTime updatedAt;
 
     @PrePersist

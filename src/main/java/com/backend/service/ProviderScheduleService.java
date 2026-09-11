@@ -68,22 +68,38 @@ public class ProviderScheduleService {
         List<TenantSchedule> tenantSchedules = tenantScheduleRepository.findByTenantId(tenant.getId());
 
         List<ProviderScheduleDTO> scheduleDTOs = schedules.stream().map(s -> {
-            boolean isTenantActive = tenantSchedules.stream()
-                    .filter(ts -> ts.getDayOfWeek().equals(s.getDayOfWeek()))
+            TenantSchedule matchingTs = tenantSchedules.stream()
+                    .filter(ts -> ts.getDayOfWeek().equalsIgnoreCase(s.getDayOfWeek()))
                     .findFirst()
-                    .map(TenantSchedule::getIsActive)
-                    .orElse(true);
+                    .orElse(null);
+
+            boolean isTenantActive = matchingTs != null ? Boolean.TRUE.equals(matchingTs.getIsActive()) : true;
+            boolean isClosedByAdmin = Boolean.TRUE.equals(s.getIsClosedByAdmin());
+            boolean effectiveActive = isTenantActive && !isClosedByAdmin && Boolean.TRUE.equals(s.getIsActive());
+
+            String closedMsg = s.getClosedMessage();
+            if (!isTenantActive) {
+                if (matchingTs != null && matchingTs.getClosedMessage() != null && !matchingTs.getClosedMessage().isBlank()) {
+                    closedMsg = matchingTs.getClosedMessage();
+                } else {
+                    closedMsg = "Closed for the weekend";
+                }
+            } else if (isClosedByAdmin) {
+                closedMsg = (s.getClosedMessage() != null && !s.getClosedMessage().isBlank())
+                        ? s.getClosedMessage() : "Scheduled off by Administrator";
+            }
 
             return ProviderScheduleDTO.builder()
                 .id(s.getId())
                 .dayOfWeek(s.getDayOfWeek())
-                .isActive(s.getIsActive())
+                .isActive(effectiveActive)
                 .isTenantActive(isTenantActive)
+                .isClosedByAdmin(isClosedByAdmin)
                 .openingTime(s.getOpeningTime())
                 .closingTime(s.getClosingTime())
                 .breakStartTime(s.getBreakStartTime())
                 .breakEndTime(s.getBreakEndTime())
-                .closedMessage(s.getClosedMessage())
+                .closedMessage(closedMsg)
                 .build();
         }).collect(Collectors.toList());
 
@@ -160,32 +176,50 @@ public class ProviderScheduleService {
                 }
 
                 if (schedule != null) {
-                    boolean active = Boolean.TRUE.equals(dto.getIsActive());
+                    final String day = schedule.getDayOfWeek();
+                    TenantSchedule matchingTs = tenantSchedules.stream()
+                            .filter(ts -> ts.getDayOfWeek().equalsIgnoreCase(day))
+                            .findFirst()
+                            .orElse(null);
+
+                    boolean isTenantActive = matchingTs != null ? Boolean.TRUE.equals(matchingTs.getIsActive()) : true;
+                    boolean requestedActive = Boolean.TRUE.equals(dto.getIsActive());
+                    boolean active = isTenantActive && requestedActive;
                     schedule.setIsActive(active);
+
+                    if (isTenantActive && !requestedActive) {
+                        // Admin explicitly scheduled this provider off on an open day
+                        schedule.setIsClosedByAdmin(true);
+                        schedule.setClosedMessage(dto.getClosedMessage() != null && !dto.getClosedMessage().isBlank()
+                                ? dto.getClosedMessage() : "Scheduled off by Administrator");
+                    } else if (!isTenantActive) {
+                        // Tenant itself is closed on this day
+                        schedule.setIsClosedByAdmin(false);
+                        schedule.setClosedMessage(matchingTs != null && matchingTs.getClosedMessage() != null && !matchingTs.getClosedMessage().isBlank()
+                                ? matchingTs.getClosedMessage() : "Closed for the weekend");
+                    } else {
+                        // Admin enabled this day for the provider
+                        schedule.setIsClosedByAdmin(false);
+                        schedule.setClosedMessage(null);
+                    }
+
                     if (dto.getOpeningTime() != null) schedule.setOpeningTime(dto.getOpeningTime());
                     if (dto.getClosingTime() != null) schedule.setClosingTime(dto.getClosingTime());
 
                     // Validate break time bounds only if active
                     if (active && dto.getBreakStartTime() != null && dto.getBreakEndTime() != null) {
                         if (!dto.getBreakStartTime().isBefore(dto.getBreakEndTime())) {
-                            throw new IllegalArgumentException("Break start time must be before break end time on " + schedule.getDayOfWeek());
+                            throw new IllegalArgumentException("Break start time must be before break end time on " + day);
                         }
                         if (schedule.getOpeningTime() != null && schedule.getClosingTime() != null) {
                             if (dto.getBreakStartTime().isBefore(schedule.getOpeningTime()) || dto.getBreakEndTime().isAfter(schedule.getClosingTime())) {
-                                throw new IllegalArgumentException("Break time must be within opening and closing hours on " + schedule.getDayOfWeek());
+                                throw new IllegalArgumentException("Break time must be within opening and closing hours on " + day);
                             }
                         }
                     }
 
                     if (dto.getBreakStartTime() != null) schedule.setBreakStartTime(dto.getBreakStartTime());
                     if (dto.getBreakEndTime() != null) schedule.setBreakEndTime(dto.getBreakEndTime());
-                    
-                    // Clear closed message if active
-                    if (schedule.getIsActive()) {
-                        schedule.setClosedMessage(null);
-                    } else {
-                        schedule.setClosedMessage(dto.getClosedMessage() != null ? dto.getClosedMessage() : "Closed");
-                    }
                     
                     providerScheduleRepository.save(schedule);
                 }
@@ -213,22 +247,38 @@ public class ProviderScheduleService {
         List<TenantSchedule> tenantSchedules = tenant != null ? tenantScheduleRepository.findByTenantId(tenant.getId()) : new ArrayList<>();
 
         List<ProviderScheduleDTO> scheduleDTOs = schedules.stream().map(s -> {
-            boolean isTenantActive = tenantSchedules.stream()
-                    .filter(ts -> ts.getDayOfWeek().equals(s.getDayOfWeek()))
+            TenantSchedule matchingTs = tenantSchedules.stream()
+                    .filter(ts -> ts.getDayOfWeek().equalsIgnoreCase(s.getDayOfWeek()))
                     .findFirst()
-                    .map(TenantSchedule::getIsActive)
-                    .orElse(true);
+                    .orElse(null);
+
+            boolean isTenantActive = matchingTs != null ? Boolean.TRUE.equals(matchingTs.getIsActive()) : true;
+            boolean isClosedByAdmin = Boolean.TRUE.equals(s.getIsClosedByAdmin());
+            boolean effectiveActive = isTenantActive && !isClosedByAdmin && Boolean.TRUE.equals(s.getIsActive());
+
+            String closedMsg = s.getClosedMessage();
+            if (!isTenantActive) {
+                if (matchingTs != null && matchingTs.getClosedMessage() != null && !matchingTs.getClosedMessage().isBlank()) {
+                    closedMsg = matchingTs.getClosedMessage();
+                } else {
+                    closedMsg = "Closed for the weekend";
+                }
+            } else if (isClosedByAdmin) {
+                closedMsg = (s.getClosedMessage() != null && !s.getClosedMessage().isBlank())
+                        ? s.getClosedMessage() : "Scheduled off by Administrator";
+            }
 
             return ProviderScheduleDTO.builder()
                 .id(s.getId())
                 .dayOfWeek(s.getDayOfWeek())
-                .isActive(s.getIsActive())
+                .isActive(effectiveActive)
                 .isTenantActive(isTenantActive)
+                .isClosedByAdmin(isClosedByAdmin)
                 .openingTime(s.getOpeningTime())
                 .closingTime(s.getClosingTime())
                 .breakStartTime(s.getBreakStartTime())
                 .breakEndTime(s.getBreakEndTime())
-                .closedMessage(s.getClosedMessage())
+                .closedMessage(closedMsg)
                 .build();
         }).collect(Collectors.toList());
 
@@ -279,6 +329,8 @@ public class ProviderScheduleService {
             tenantRepository.save(tenant);
         }
 
+        List<TenantSchedule> tenantSchedules = tenant != null ? tenantScheduleRepository.findByTenantId(tenant.getId()) : Collections.emptyList();
+
         if (request.getSchedules() != null) {
             for (ProviderScheduleDTO dto : request.getSchedules()) {
                 ProviderSchedule schedule = null;
@@ -296,7 +348,23 @@ public class ProviderScheduleService {
                 }
 
                 if (schedule != null) {
-                    boolean active = Boolean.TRUE.equals(dto.getIsActive());
+                    final String day = schedule.getDayOfWeek();
+                    boolean isTenantActive = tenantSchedules.stream()
+                            .filter(ts -> ts.getDayOfWeek().equalsIgnoreCase(day))
+                            .findFirst()
+                            .map(TenantSchedule::getIsActive)
+                            .orElse(true);
+
+                    if (!isTenantActive && Boolean.TRUE.equals(dto.getIsActive())) {
+                        String facilityName = tenant != null && tenant.getOrganizationName() != null ? tenant.getOrganizationName() : "Facility";
+                        throw new IllegalArgumentException("Cannot enable working hours on " + day + ": " + facilityName + " is closed on this day by the Administrator.");
+                    }
+
+                    if (Boolean.TRUE.equals(schedule.getIsClosedByAdmin()) && Boolean.TRUE.equals(dto.getIsActive())) {
+                        throw new IllegalArgumentException("Cannot enable working hours on " + day + ": You have been scheduled off on this day by the Administrator.");
+                    }
+
+                    boolean active = isTenantActive && !Boolean.TRUE.equals(schedule.getIsClosedByAdmin()) && Boolean.TRUE.equals(dto.getIsActive());
                     schedule.setIsActive(active);
                     
                     if (dto.getOpeningTime() != null) schedule.setOpeningTime(dto.getOpeningTime());

@@ -15,20 +15,43 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.stream.Collectors;
 
+import com.backend.model.Tenant;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
 @Service
 @RequiredArgsConstructor
 public class AuditLogService {
 
     private final AuditLogRepository auditLogRepository;
 
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void logAction(User user, Tenant tenant, String eventAction, String sourceIp) {
+        try {
+            AuditLog log = AuditLog.builder()
+                    .user(user)
+                    .tenant(tenant != null ? tenant : (user != null ? user.getTenant() : null))
+                    .eventAction(eventAction)
+                    .sourceIp(sourceIp != null ? sourceIp : "127.0.0.1")
+                    .build();
+            auditLogRepository.save(log);
+        } catch (Exception ignored) {}
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void logAction(User user, String eventAction, String sourceIp) {
-        AuditLog log = AuditLog.builder()
-                .user(user)
-                .eventAction(eventAction)
-                .sourceIp(sourceIp)
-                .tenant(user.getTenant())
-                .build();
-        auditLogRepository.save(log);
+        logAction(user, user != null ? user.getTenant() : null, eventAction, sourceIp);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void logAction(String actor, String eventAction, String entityType, Long entityId, String entityName, String details) {
+        try {
+            AuditLog log = AuditLog.builder()
+                    .eventAction(eventAction + " [" + entityType + ":" + entityId + " - " + entityName + "]: " + details)
+                    .sourceIp(actor != null ? actor : "SYSTEM")
+                    .build();
+            auditLogRepository.save(log);
+        } catch (Exception ignored) {}
     }
 
     public List<AuditLog> getRecentLogs(Long tenantId) {

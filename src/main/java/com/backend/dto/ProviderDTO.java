@@ -25,4 +25,6 @@ public class ProviderDTO {
     private Double thisWeekStripe;
     private Double thisWeekEsewa;
     private Double totalEarnings;
+    private Double commissionRate;
+    private Double effectiveCommissionRate;
 }

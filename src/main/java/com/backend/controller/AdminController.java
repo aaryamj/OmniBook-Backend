@@ -97,6 +97,25 @@ public class AdminController {
         }
     }
 
+    @PutMapping("/providers/{id}/commission")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> updateProviderCommission(@PathVariable Long id, @RequestBody java.util.Map<String, Object> request, Principal principal) {
+        try {
+            Double commissionRate = null;
+            if (request.containsKey("commissionRate") && request.get("commissionRate") != null) {
+                commissionRate = Double.valueOf(request.get("commissionRate").toString());
+            }
+            adminService.updateProviderCommission(id, commissionRate, principal.getName());
+            return ResponseEntity.ok(java.util.Map.of(
+                "success", true, 
+                "message", "Provider commission rate updated successfully",
+                "commissionRate", commissionRate != null ? commissionRate : "DEFAULT"
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
     @PutMapping("/appointments/{id}/status")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<?> updateAppointmentStatus(@PathVariable Long id, @RequestParam String status, Principal principal) {

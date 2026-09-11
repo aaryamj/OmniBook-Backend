@@ -21,6 +21,7 @@ import java.util.Map;
 public class SubscriptionController {
 
     private final SubscriptionService subscriptionService;
+    private final com.backend.service.SubscriptionPlanService subscriptionPlanService;
 
     @PostMapping("/initiate")
     public ResponseEntity<?> initiateSubscription(@Valid @RequestBody SubscriptionPurchaseRequest request) {
@@ -33,43 +34,73 @@ public class SubscriptionController {
     }
 
     @GetMapping("/verify-esewa")
-    public ResponseEntity<Void> verifyEsewa(@RequestParam(value = "data", required = false) String data) {
+    public ResponseEntity<Void> verifyEsewa(
+            @RequestParam(value = "data", required = false) String data,
+            @RequestParam(value = "origin", required = false) String origin) {
+        String failureBase = "admin".equalsIgnoreCase(origin)
+                ? "http://localhost:5173/admin/subscription?payment=failed"
+                : "http://localhost:5173/pricing?payment=failed";
+
         if (data == null || data.isEmpty()) {
-            return ResponseEntity.status(302).location(URI.create("http://localhost:5173/pricing?payment=failed&error=no_data")).build();
+            return ResponseEntity.status(302).location(URI.create(failureBase + "&error=no_data")).build();
         }
 
         try {
             String orderNumber = subscriptionService.verifyEsewaSubscription(data);
             if (orderNumber != null) {
-                return ResponseEntity.status(302).location(URI.create("http://localhost:5173/pricing?subscription_success=true&order_number=" + orderNumber)).build();
+                String successUrl = "admin".equalsIgnoreCase(origin)
+                        ? "http://localhost:5173/admin/subscription?payment_success=true&order_number=" + orderNumber
+                        : "http://localhost:5173/pricing?subscription_success=true&order_number=" + orderNumber;
+                return ResponseEntity.status(302).location(URI.create(successUrl)).build();
             } else {
-                return ResponseEntity.status(302).location(URI.create("http://localhost:5173/pricing?payment=failed&error=verification_failed")).build();
+                return ResponseEntity.status(302).location(URI.create(failureBase + "&error=verification_failed")).build();
             }
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.status(302).location(URI.create("http://localhost:5173/pricing?payment=failed&error=exception")).build();
+            return ResponseEntity.status(302).location(URI.create(failureBase + "&error=exception")).build();
         }
     }
 
     @GetMapping("/verify-stripe")
     public ResponseEntity<Void> verifyStripe(
             @RequestParam(value = "session_id", required = false) String sessionId,
-            @RequestParam(value = "order_number", required = false) String orderNumber) {
+            @RequestParam(value = "order_number", required = false) String orderNumber,
+            @RequestParam(value = "origin", required = false) String origin) {
+        String failureBase = "admin".equalsIgnoreCase(origin)
+                ? "http://localhost:5173/admin/subscription?payment=failed"
+                : "http://localhost:5173/pricing?payment=failed";
+
         if (sessionId == null || sessionId.isEmpty()) {
-            return ResponseEntity.status(302).location(URI.create("http://localhost:5173/pricing?payment=failed&error=no_session")).build();
+            return ResponseEntity.status(302).location(URI.create(failureBase + "&error=no_session")).build();
         }
 
         try {
             String verifiedOrderNumber = subscriptionService.verifyStripeSubscription(sessionId, orderNumber);
             if (verifiedOrderNumber != null) {
-                return ResponseEntity.status(302).location(URI.create("http://localhost:5173/pricing?subscription_success=true&order_number=" + verifiedOrderNumber)).build();
+                String successUrl = "admin".equalsIgnoreCase(origin)
+                        ? "http://localhost:5173/admin/subscription?payment_success=true&order_number=" + verifiedOrderNumber
+                        : "http://localhost:5173/pricing?subscription_success=true&order_number=" + verifiedOrderNumber;
+                return ResponseEntity.status(302).location(URI.create(successUrl)).build();
             } else {
-                return ResponseEntity.status(302).location(URI.create("http://localhost:5173/pricing?payment=failed&error=verification_failed")).build();
+                return ResponseEntity.status(302).location(URI.create(failureBase + "&error=verification_failed")).build();
             }
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.status(302).location(URI.create("http://localhost:5173/pricing?payment=failed&error=exception")).build();
+            return ResponseEntity.status(302).location(URI.create(failureBase + "&error=exception")).build();
         }
+    }
+
+    @GetMapping("/cancel")
+    public ResponseEntity<Void> cancelSubscriptionPayment(
+            @RequestParam(value = "order_number", required = false) String orderNumber,
+            @RequestParam(value = "origin", required = false) String origin) {
+        if (orderNumber != null && !orderNumber.isBlank()) {
+            subscriptionService.markOrderCancelled(orderNumber);
+        }
+        String cancelUrl = "admin".equalsIgnoreCase(origin)
+                ? "http://localhost:5173/admin/subscription?payment=cancelled"
+                : "http://localhost:5173/pricing?payment=cancelled";
+        return ResponseEntity.status(302).location(URI.create(cancelUrl)).build();
     }
 
     @GetMapping("/order/{orderNumber}")
@@ -118,6 +149,70 @@ public class SubscriptionController {
             return ResponseEntity.ok(result);
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/plans")
+    public ResponseEntity<List<com.backend.dto.SubscriptionPlanDTO>> getActivePlans() {
+        return ResponseEntity.ok(subscriptionPlanService.getActivePlans());
+    }
+
+    @GetMapping("/my-overview")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> getMySubscriptionOverview(java.security.Principal principal) {
+        try {
+            if (principal == null) {
+                return ResponseEntity.status(401).body(Map.of("message", "Unauthorized"));
+            }
+            return ResponseEntity.ok(subscriptionService.getAdminSubscriptionOverview(principal.getName()));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/renew")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> renewSubscription(
+            @RequestBody Map<String, String> payload,
+            java.security.Principal principal) {
+        try {
+            if (principal == null) {
+                return ResponseEntity.status(401).body(Map.of("message", "Unauthorized"));
+            }
+            String planName = payload.get("planName");
+            String billingCycle = payload.getOrDefault("billingCycle", "Monthly");
+            String paymentMethod = payload.getOrDefault("paymentMethod", "ESEWA");
+            return ResponseEntity.ok(subscriptionService.renewSubscription(principal.getName(), planName, billingCycle, paymentMethod));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/extension-request")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> submitExtensionRequest(
+            @Valid @RequestBody com.backend.dto.SubscriptionExtensionRequestDTO dto,
+            java.security.Principal principal) {
+        try {
+            if (principal == null) {
+                return ResponseEntity.status(401).body(Map.of("message", "Unauthorized"));
+            }
+            return ResponseEntity.ok(subscriptionService.submitExtensionRequest(principal.getName(), dto));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/extension-requests/my")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> getMyExtensionRequests(java.security.Principal principal) {
+        try {
+            if (principal == null) {
+                return ResponseEntity.status(401).body(Map.of("message", "Unauthorized"));
+            }
+            return ResponseEntity.ok(subscriptionService.getTenantExtensionRequests(principal.getName()));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
         }
     }
 }

@@ -20,4 +20,6 @@ public class AIChatResponseDTO {
     private String organizationType;
     private String matchReason;
     private List<AISlotDTO> recommendedSlots;
+    private Integer currentStep; // 1: Org Type, 2: Org/Location, 3: Services, 4: Slots, 5: Book/Payment
+    private List<String> quickReplies; // Buttons/chips for user to quickly click (e.g. org types, org names, services)
 }

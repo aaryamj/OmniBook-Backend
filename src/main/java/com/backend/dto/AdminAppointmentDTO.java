@@ -24,6 +24,8 @@ public class AdminAppointmentDTO {
     private String department;
     private String status;
     private String paymentStatus;
+    private String paymentMethod;
+    private String billingStatus;
     private String appointmentType;
     private String meetingLink;
     private Boolean videoCallEnabled;
@@ -49,6 +51,10 @@ public class AdminAppointmentDTO {
     private String cancelledAt;
     private String cancelledByName;
     private String cancelledByRole;
+    private String rejectedAt;
+    private String rejectedByName;
+    private String rejectedByRole;
+    private String rejectionReason;
     
     // Notes & Feedback
     private String treatmentSummary;

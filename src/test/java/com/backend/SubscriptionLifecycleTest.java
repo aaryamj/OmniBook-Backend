@@ -45,6 +45,12 @@ public class SubscriptionLifecycleTest {
     private UserRepository userRepository;
 
     @Mock
+    private com.backend.repository.InvitationRepository invitationRepository;
+
+    @Mock
+    private com.backend.repository.AppointmentRepository appointmentRepository;
+
+    @Mock
     private SubscriptionPlanRepository subscriptionPlanRepository;
 
     @Mock
@@ -280,5 +286,34 @@ public class SubscriptionLifecycleTest {
         assertEquals(originalExpiry, activeTenant.getSubscriptionExpiryDate());
         assertEquals(originalTier, activeTenant.getSubscriptionTier());
         verify(tenantRepository, never()).save(activeTenant);
+    }
+
+    @Test
+    void testInitiateSubscription_AnnualBillingCycleResolvesAnnualPrice() {
+        SubscriptionPlan proPlan = new SubscriptionPlan();
+        proPlan.setId(2L);
+        proPlan.setName("Professional");
+        proPlan.setMonthlyPrice(5000.0);
+        proPlan.setAnnualPrice(51000.0);
+
+        when(subscriptionPlanService.getPlanEntityByName("Professional")).thenReturn(proPlan);
+        when(tenantRepository.existsByRegistrationNumber("REG-9999")).thenReturn(false);
+
+        com.backend.dto.SubscriptionPurchaseRequest request = new com.backend.dto.SubscriptionPurchaseRequest();
+        request.setOrganizationName("Narayan Hospital");
+        request.setRegistrationNumber("REG-9999");
+        request.setPlanTier("Professional");
+        request.setBillingCycle("Annual"); // From frontend
+        request.setPaymentMethod("eSewa");
+
+        var response = subscriptionService.initiateSubscription(request);
+
+        assertNotNull(response);
+        assertEquals(51000.0, (Double) response.get("amount"));
+        assertEquals("eSewa", response.get("paymentMethod"));
+        verify(subscriptionOrderRepository, times(1)).save(argThat(savedOrder -> 
+            savedOrder.getAmount().equals(51000.0) &&
+            savedOrder.getSubscriptionExpiryDate().isEqual(LocalDate.now().plusYears(1))
+        ));
     }
 }

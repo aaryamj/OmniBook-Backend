@@ -234,4 +234,23 @@ public class AppointmentLifecycleController {
             return ResponseEntity.badRequest().body(Map.of("success", false, "message", e.getMessage()));
         }
     }
+
+    /**
+     * Admin/Provider: Reject booking request and process 100% full refund.
+     */
+    @PostMapping("/admin/appointments/{id}/reject")
+    public ResponseEntity<?> rejectAppointmentByAdmin(
+            @PathVariable Long id,
+            @RequestBody(required = false) Map<String, String> body) {
+        try {
+            User user = getCurrentAuthenticatedUser();
+            String email = user != null ? user.getEmail() : "admin";
+            String reason = body != null ? body.get("reason") : "Declined by organization admin";
+            Map<String, Object> result = lifecycleService.rejectAppointmentByProvider(id, email, reason);
+            return ResponseEntity.ok(result);
+        } catch (Exception e) {
+            log.error("Error rejecting appointment {}: {}", id, e.getMessage());
+            return ResponseEntity.badRequest().body(Map.of("success", false, "message", e.getMessage()));
+        }
+    }
 }

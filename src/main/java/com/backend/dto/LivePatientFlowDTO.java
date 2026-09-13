@@ -17,5 +17,8 @@ public class LivePatientFlowDTO {
     private String service;
     private String providerName;
     private String status; // Waiting Room, In-Consultation, etc.
-    private String billingStatus; // eSewa Verified, Stripe Verified, etc.
+    private String billingStatus; // [eSewa Verified], [Stripe Verified], [Cash Verified], Pending
+    private String paymentMethod;
+    private String paymentStatus;
+    private Double price;
 }

@@ -43,10 +43,27 @@ public class SubscriptionService {
     private final InvitationRepository invitationRepository;
     private final AuditLogService auditLogService;
 
+    public static boolean isAnnualCycle(String billingCycle) {
+        if (billingCycle == null) return false;
+        String normalized = billingCycle.trim().toLowerCase();
+        return normalized.contains("annual") || normalized.contains("year");
+    }
+
     @Transactional
     public Map<String, Object> initiateSubscription(SubscriptionPurchaseRequest request) {
-        if (tenantRepository.existsByRegistrationNumber(request.getRegistrationNumber())) {
-            throw new RuntimeException("An organization with registration/PAN number " + request.getRegistrationNumber() + " already exists.");
+        // Check if this is an upgrade/renewal for an existing organization
+        Tenant existingTenant = null;
+        if (request.getRegistrationNumber() != null && !request.getRegistrationNumber().isBlank()) {
+            existingTenant = tenantRepository.findByRegistrationNumber(request.getRegistrationNumber().trim()).orElse(null);
+        }
+        if (existingTenant == null && request.getAdminEmail() != null && !request.getAdminEmail().isBlank()) {
+            User existingAdmin = userRepository.findByEmail(request.getAdminEmail().trim()).orElse(null);
+            if (existingAdmin != null && existingAdmin.getTenant() != null) {
+                existingTenant = existingAdmin.getTenant();
+            }
+        }
+        if (existingTenant == null && request.getOrganizationName() != null && !request.getOrganizationName().isBlank()) {
+            existingTenant = tenantRepository.findByOrganizationName(request.getOrganizationName().trim()).orElse(null);
         }
 
         Random random = new Random();
@@ -58,19 +75,31 @@ public class SubscriptionService {
 
         // Retrieve dynamic price from catalog
         SubscriptionPlan plan = subscriptionPlanService.getPlanEntityByName(request.getPlanTier());
+        boolean isAnnual = isAnnualCycle(request.getBillingCycle());
         double dynamicPrice;
         if (plan != null) {
-            dynamicPrice = "Annually".equalsIgnoreCase(request.getBillingCycle()) ? plan.getAnnualPrice() : plan.getMonthlyPrice();
+            dynamicPrice = isAnnual ? plan.getAnnualPrice() : plan.getMonthlyPrice();
         } else {
-            dynamicPrice = subscriptionPlanService.getFallbackMonthlyPriceForTier(request.getPlanTier());
+            dynamicPrice = isAnnual 
+                    ? subscriptionPlanService.getFallbackAnnualPriceForTier(request.getPlanTier())
+                    : subscriptionPlanService.getFallbackMonthlyPriceForTier(request.getPlanTier());
         }
 
-        LocalDate startDate = LocalDate.now();
-        LocalDate expiryDate = "Annually".equalsIgnoreCase(request.getBillingCycle()) ? startDate.plusYears(1) : startDate.plusMonths(1);
+        LocalDate today = LocalDate.now();
+        LocalDate startDate = today;
+        LocalDate expiryDate;
+
+        if (existingTenant != null && existingTenant.getSubscriptionExpiryDate() != null && !today.isAfter(existingTenant.getSubscriptionExpiryDate())) {
+            startDate = existingTenant.getSubscriptionStartDate() != null ? existingTenant.getSubscriptionStartDate() : today;
+            expiryDate = isAnnual ? existingTenant.getSubscriptionExpiryDate().plusYears(1) : existingTenant.getSubscriptionExpiryDate().plusMonths(1);
+        } else {
+            expiryDate = isAnnual ? startDate.plusYears(1) : startDate.plusMonths(1);
+        }
 
         // Save initial SubscriptionOrder with PENDING_REVIEW status
         SubscriptionOrder order = SubscriptionOrder.builder()
                 .orderNumber(orderNumber)
+                .tenantId(existingTenant != null ? existingTenant.getId() : null)
                 .organizationName(request.getOrganizationName())
                 .organizationType(request.getOrganizationType())
                 .registrationNumber(request.getRegistrationNumber())
@@ -192,11 +221,18 @@ public class SubscriptionService {
 
     @Transactional
     public String verifyEsewaSubscription(String data) {
-        if (data == null || data.isEmpty()) {
+        if (data == null || data.trim().isEmpty()) {
             return null;
         }
         try {
-            String decodedData = new String(Base64.getDecoder().decode(data));
+            String cleanData = data.trim().replace(" ", "+");
+            byte[] decodedBytes;
+            try {
+                decodedBytes = Base64.getDecoder().decode(cleanData);
+            } catch (Exception ex) {
+                decodedBytes = Base64.getUrlDecoder().decode(cleanData);
+            }
+            String decodedData = new String(decodedBytes, java.nio.charset.StandardCharsets.UTF_8);
 
             String status = "";
             java.util.regex.Matcher statusMatcher = java.util.regex.Pattern.compile("\"status\"\\s*:\\s*\"([^\"]+)\"").matcher(decodedData);
@@ -237,7 +273,7 @@ public class SubscriptionService {
 
                         createOrUpdatePlatformInvoice(order);
 
-                        // Sync tenant if already created
+                        // Sync tenant if already created or existing
                         syncTenantSubscription(order);
 
                         try {
@@ -261,7 +297,7 @@ public class SubscriptionService {
                 }
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            log.error("Failed to verify eSewa subscription payload: " + e.getMessage(), e);
         }
         return null;
     }
@@ -318,7 +354,7 @@ public class SubscriptionService {
                 }
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            log.error("Failed to verify Stripe subscription: " + e.getMessage(), e);
         }
         return null;
     }
@@ -340,8 +376,18 @@ public class SubscriptionService {
         Tenant tenant = null;
         if (order.getTenantId() != null) {
             tenant = tenantRepository.findById(order.getTenantId()).orElse(null);
-        } else if (order.getRegistrationNumber() != null) {
-            tenant = tenantRepository.findByRegistrationNumber(order.getRegistrationNumber()).orElse(null);
+        } 
+        if (tenant == null && order.getRegistrationNumber() != null && !order.getRegistrationNumber().isBlank()) {
+            tenant = tenantRepository.findByRegistrationNumber(order.getRegistrationNumber().trim()).orElse(null);
+        }
+        if (tenant == null && order.getAdminEmail() != null && !order.getAdminEmail().isBlank()) {
+            User adminUser = userRepository.findByEmail(order.getAdminEmail().trim()).orElse(null);
+            if (adminUser != null && adminUser.getTenant() != null) {
+                tenant = adminUser.getTenant();
+            }
+        }
+        if (tenant == null && order.getOrganizationName() != null && !order.getOrganizationName().isBlank()) {
+            tenant = tenantRepository.findByOrganizationName(order.getOrganizationName().trim()).orElse(null);
         }
 
         if (tenant != null) {
@@ -351,12 +397,18 @@ public class SubscriptionService {
             tenant.setSubscriptionTier(order.getPlanTier());
             tenant.setBillingCycle(order.getBillingCycle());
             tenant.setSubscriptionStartDate(order.getSubscriptionStartDate() != null ? order.getSubscriptionStartDate() : LocalDate.now());
-            tenant.setSubscriptionExpiryDate(order.getSubscriptionExpiryDate() != null ? order.getSubscriptionExpiryDate() : LocalDate.now().plusMonths(1));
+            tenant.setSubscriptionExpiryDate(order.getSubscriptionExpiryDate() != null 
+                    ? order.getSubscriptionExpiryDate() 
+                    : (isAnnualCycle(order.getBillingCycle()) ? LocalDate.now().plusYears(1) : LocalDate.now().plusMonths(1)));
             tenant.setSubscriptionStatus("ACTIVE");
             tenant.setStatus("ACTIVE");
             tenant.setLastSuspendedReason(null);
             tenant.setLastReminderDaysSent("");
             tenantRepository.save(tenant);
+            log.info("syncTenantSubscription: Upgraded Tenant '{}' (ID: {}) to tier '{}' with status ACTIVE and expiry {}",
+                    tenant.getOrganizationName(), tenant.getId(), tenant.getSubscriptionTier(), tenant.getSubscriptionExpiryDate());
+        } else {
+            log.warn("syncTenantSubscription: No existing Tenant found for order #{}. Invitation/onboarding required.", order.getOrderNumber());
         }
     }
 
@@ -367,7 +419,7 @@ public class SubscriptionService {
         LocalDate start = order.getSubscriptionStartDate() != null ? order.getSubscriptionStartDate() : now;
         LocalDate endDate = order.getSubscriptionExpiryDate() != null 
                 ? order.getSubscriptionExpiryDate() 
-                : ("Annually".equalsIgnoreCase(order.getBillingCycle()) ? start.plusYears(1) : start.plusMonths(1));
+                : (isAnnualCycle(order.getBillingCycle()) ? start.plusYears(1) : start.plusMonths(1));
         String billingPeriod = start.format(fmt) + " - " + endDate.format(fmt);
 
         PlatformInvoice invoice = platformInvoiceRepository.findByOrderNumber(order.getOrderNumber()).orElse(null);
@@ -431,7 +483,7 @@ public class SubscriptionService {
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("MMM d, yyyy");
         LocalDate endDate = order.getSubscriptionExpiryDate() != null 
                 ? order.getSubscriptionExpiryDate() 
-                : ("Annually".equalsIgnoreCase(order.getBillingCycle()) ? now.plusYears(1) : now.plusMonths(1));
+                : (isAnnualCycle(order.getBillingCycle()) ? now.plusYears(1) : now.plusMonths(1));
         String billingPeriod = (invoice != null && invoice.getBillingPeriod() != null)
                 ? invoice.getBillingPeriod()
                 : (now.format(fmt) + " - " + endDate.format(fmt));
@@ -481,18 +533,21 @@ public class SubscriptionService {
 
         // Dynamic price resolution
         SubscriptionPlan plan = subscriptionPlanService.getPlanEntityByName(request.getPlanTier());
+        boolean isAnnual = isAnnualCycle(request.getBillingCycle());
         double dynamicPrice;
         if (plan != null) {
-            dynamicPrice = "Annually".equalsIgnoreCase(request.getBillingCycle()) ? plan.getAnnualPrice() : plan.getMonthlyPrice();
+            dynamicPrice = isAnnual ? plan.getAnnualPrice() : plan.getMonthlyPrice();
         } else {
-            dynamicPrice = subscriptionPlanService.getFallbackMonthlyPriceForTier(request.getPlanTier());
+            dynamicPrice = isAnnual 
+                    ? subscriptionPlanService.getFallbackAnnualPriceForTier(request.getPlanTier())
+                    : subscriptionPlanService.getFallbackMonthlyPriceForTier(request.getPlanTier());
         }
 
         LocalDate now = LocalDate.now();
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("MMM d, yyyy");
         String invoiceDate = now.format(fmt);
 
-        LocalDate endDate = "Annually".equalsIgnoreCase(request.getBillingCycle()) ? now.plusYears(1) : now.plusMonths(1);
+        LocalDate endDate = isAnnual ? now.plusYears(1) : now.plusMonths(1);
         String billingPeriod = now.format(fmt) + " - " + endDate.format(fmt);
 
         String currency = request.getCurrency() != null ? request.getCurrency() : "NPR";
@@ -602,7 +657,8 @@ public class SubscriptionService {
         }
 
         String cycle = billingCycle != null ? billingCycle : (tenant.getBillingCycle() != null ? tenant.getBillingCycle() : "Monthly");
-        double amount = "Annually".equalsIgnoreCase(cycle) ? plan.getAnnualPrice() : plan.getMonthlyPrice();
+        boolean isAnnual = isAnnualCycle(cycle);
+        double amount = isAnnual ? plan.getAnnualPrice() : plan.getMonthlyPrice();
 
         LocalDate today = LocalDate.now();
         LocalDate newStartDate;
@@ -611,13 +667,13 @@ public class SubscriptionService {
         // Early renewal preserves remaining valid subscription period
         if (tenant.getSubscriptionExpiryDate() != null && !today.isAfter(tenant.getSubscriptionExpiryDate())) {
             newStartDate = tenant.getSubscriptionStartDate() != null ? tenant.getSubscriptionStartDate() : today;
-            newExpiryDate = "Annually".equalsIgnoreCase(cycle) 
+            newExpiryDate = isAnnual 
                     ? tenant.getSubscriptionExpiryDate().plusYears(1) 
                     : tenant.getSubscriptionExpiryDate().plusMonths(1);
         } else {
             // Late renewal after expiration starts new subscription cycle today
             newStartDate = today;
-            newExpiryDate = "Annually".equalsIgnoreCase(cycle) 
+            newExpiryDate = isAnnual 
                     ? today.plusYears(1) 
                     : today.plusMonths(1);
         }
@@ -677,7 +733,7 @@ public class SubscriptionService {
             esewaParams.put("product_code", productCode);
             esewaParams.put("product_service_charge", "0");
             esewaParams.put("product_delivery_charge", "0");
-            esewaParams.put("success_url", "http://localhost:8080/api/v1/subscriptions/verify-esewa?origin=admin");
+            esewaParams.put("success_url", "http://localhost:8080/api/v1/subscriptions/verify-esewa");
             esewaParams.put("failure_url", "http://localhost:8080/api/v1/subscriptions/cancel?order_number=" + orderNumber + "&origin=admin");
             esewaParams.put("signed_field_names", "total_amount,transaction_uuid,product_code");
 
@@ -1432,6 +1488,38 @@ public class SubscriptionService {
             return Collections.emptyList();
         }
         return getExtensionRequestsForTenant(tenant.getId());
+    }
+
+    @Transactional(readOnly = true)
+    public List<SubscriptionOrderLookupDTO> lookupOrdersForProvisioning(String query) {
+        List<SubscriptionOrder> orders;
+        if (query == null || query.trim().isEmpty()) {
+            orders = subscriptionOrderRepository.findTop20ByOrderByCreatedAtDesc();
+        } else {
+            orders = subscriptionOrderRepository.searchOrders(query.trim());
+        }
+
+        return orders.stream().map(o -> SubscriptionOrderLookupDTO.builder()
+                .id(o.getId())
+                .orderNumber(o.getOrderNumber())
+                .invoiceNumber(o.getInvoiceNumber())
+                .organizationName(o.getOrganizationName())
+                .organizationType(o.getOrganizationType())
+                .registrationNumber(o.getRegistrationNumber())
+                .address(o.getAddress())
+                .adminFullName(o.getAdminFullName())
+                .adminEmail(o.getAdminEmail())
+                .adminPhone(o.getAdminPhone())
+                .planTier(o.getPlanTier())
+                .billingCycle(o.getBillingCycle())
+                .amount(o.getAmount())
+                .currency(o.getCurrency())
+                .paymentStatus(o.getPaymentStatus())
+                .verificationStatus(o.getVerificationStatus())
+                .tenantId(o.getTenantId())
+                .createdAt(o.getCreatedAt())
+                .build()
+        ).collect(Collectors.toList());
     }
 }
 

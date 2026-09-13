@@ -326,6 +326,10 @@ public class AdminService {
     }
 
     public AdminDashboardStatsDTO getDashboardStats(String adminEmail) {
+        return getDashboardStats(adminEmail, "All Time");
+    }
+
+    public AdminDashboardStatsDTO getDashboardStats(String adminEmail, String timeFilter) {
         User admin = userRepository.findByEmail(adminEmail)
                 .orElseThrow(() -> new RuntimeException("Admin not found"));
 
@@ -341,39 +345,63 @@ public class AdminService {
         LocalDate startOfWeek = today.with(java.time.temporal.TemporalAdjusters.previousOrSame(java.time.DayOfWeek.MONDAY));
         LocalDate endOfWeek = today.with(java.time.temporal.TemporalAdjusters.nextOrSame(java.time.DayOfWeek.SUNDAY));
 
-        int todayVolume = 0;
+        LocalDate filterStartDate = parseAdminTimeFilter(timeFilter);
+
+        int periodVolume = 0;
         int activeInClinic = 0;
         int waitingPatients = 0;
         int inConsultPatients = 0;
         double esewaSettled = 0;
         double stripeConnect = 0;
+        double cashSettled = 0;
 
         List<LivePatientFlowDTO> livePatientFlow = new ArrayList<>();
         List<Integer> weeklyAppointments = new ArrayList<>(java.util.Collections.nCopies(7, 0));
         double esewaWeeklyVolume = 0;
         double stripeWeeklyVolume = 0;
+        double cashWeeklyVolume = 0;
+
+        Tenant tenant = admin.getTenant();
+        boolean isClinic = tenant != null && "Clinic".equalsIgnoreCase(tenant.getOrganizationType());
 
         for (Appointment a : allAppointments) {
             LocalDate appDate = a.getAppointmentDate();
-            
-            // Weekly stats
-            if (appDate != null && !appDate.isBefore(startOfWeek) && !appDate.isAfter(endOfWeek)) {
+            if (appDate == null) continue;
+
+            // Check if within time filter
+            boolean inFilter = false;
+            if (filterStartDate == null) {
+                inFilter = true; // All Time
+            } else if ("today".equalsIgnoreCase(timeFilter != null ? timeFilter.trim() : "")) {
+                inFilter = appDate.equals(today);
+            } else {
+                inFilter = !appDate.isBefore(filterStartDate);
+            }
+
+            boolean isPaid = "SUCCESS".equalsIgnoreCase(a.getPaymentStatus()) || "PAID".equalsIgnoreCase(a.getPaymentStatus());
+            String method = a.getPaymentMethod() != null ? a.getPaymentMethod().trim().toUpperCase() : "CASH";
+
+            // Weekly distribution (always track week for chart if within current week)
+            if (!appDate.isBefore(startOfWeek) && !appDate.isAfter(endOfWeek)) {
                 int dayIndex = appDate.getDayOfWeek().getValue() - 1; // 0=Mon, 6=Sun
                 weeklyAppointments.set(dayIndex, weeklyAppointments.get(dayIndex) + 1);
 
-                if ("SUCCESS".equals(a.getPaymentStatus())) {
-                    if ("ESEWA".equals(a.getPaymentMethod())) {
-                        esewaWeeklyVolume += (a.getPrice() != null ? a.getPrice() : 0);
-                    } else if ("STRIPE".equals(a.getPaymentMethod())) {
-                        stripeWeeklyVolume += (a.getPrice() != null ? a.getPrice() : 0);
+                if (isPaid) {
+                    double priceVal = (a.getPrice() != null ? a.getPrice() : 0);
+                    if ("ESEWA".equals(method)) {
+                        esewaWeeklyVolume += priceVal;
+                    } else if ("STRIPE".equals(method)) {
+                        stripeWeeklyVolume += priceVal;
+                    } else if ("CASH".equals(method) || "IN_PERSON".equals(method)) {
+                        cashWeeklyVolume += priceVal;
                     }
                 }
             }
 
-            // Today stats
-            if (appDate != null && appDate.equals(today)) {
-                todayVolume++;
-                
+            // Stats for selected timeframe
+            if (inFilter) {
+                periodVolume++;
+
                 if ("CHECKED_IN".equals(a.getAppointmentStatus()) || "WAITING".equals(a.getAppointmentStatus())) {
                     activeInClinic++;
                     waitingPatients++;
@@ -382,29 +410,30 @@ public class AdminService {
                     inConsultPatients++;
                 }
 
-                if ("SUCCESS".equals(a.getPaymentStatus())) {
-                    if ("ESEWA".equals(a.getPaymentMethod())) {
-                        esewaSettled += (a.getPrice() != null ? a.getPrice() : 0);
-                    } else if ("STRIPE".equals(a.getPaymentMethod())) {
-                        stripeConnect += (a.getPrice() != null ? a.getPrice() : 0);
+                if (isPaid) {
+                    double priceVal = (a.getPrice() != null ? a.getPrice() : 0);
+                    if ("ESEWA".equals(method)) {
+                        esewaSettled += priceVal;
+                    } else if ("STRIPE".equals(method)) {
+                        stripeConnect += priceVal;
+                    } else if ("CASH".equals(method) || "IN_PERSON".equals(method)) {
+                        cashSettled += priceVal;
                     }
                 }
 
-                // Add to live flow
-                User provider = userRepository.findById(a.getProviderId()).orElse(null);
-                String providerName = provider != null ? provider.getFullName() : "Unknown";
-                
-                Tenant tenant = admin.getTenant();
-                boolean isClinic = tenant != null && "Clinic".equalsIgnoreCase(tenant.getOrganizationType());
+                // Add to patient flow tracker
+                User provider = a.getProviderId() != null ? userRepository.findById(a.getProviderId()).orElse(null) : null;
+                String providerName = provider != null ? provider.getFullName() : (a.getDoctorName() != null ? a.getDoctorName() : "Unknown");
                 String prefix = (isClinic && !providerName.toLowerCase().startsWith("dr.") ? "Dr. " : "");
 
                 String billingStatus = "Pending";
-                if ("SUCCESS".equals(a.getPaymentStatus())) {
-                    if ("ESEWA".equals(a.getPaymentMethod())) billingStatus = "[eSewa Verified]";
-                    else if ("STRIPE".equals(a.getPaymentMethod())) billingStatus = "[Stripe Verified]";
+                if (isPaid) {
+                    if ("ESEWA".equals(method)) billingStatus = "[eSewa Verified]";
+                    else if ("STRIPE".equals(method)) billingStatus = "[Stripe Verified]";
+                    else if ("CASH".equals(method) || "IN_PERSON".equals(method)) billingStatus = "[Cash Verified]";
                     else billingStatus = "[Verified]";
                 }
-                
+
                 livePatientFlow.add(LivePatientFlowDTO.builder()
                         .id(a.getId())
                         .time(a.getAppointmentTime() != null ? a.getAppointmentTime().toString() : "N/A")
@@ -414,16 +443,43 @@ public class AdminService {
                         .providerName(prefix + providerName)
                         .status(a.getAppointmentStatus() != null ? a.getAppointmentStatus() : "SCHEDULED")
                         .billingStatus(billingStatus)
+                        .paymentMethod(a.getPaymentMethod())
+                        .paymentStatus(a.getPaymentStatus())
+                        .price(a.getPrice())
                         .build());
             }
         }
 
-        // Total capacity = providers * 10 just as a dummy logic, or 60.
-        int totalCapacity = allProviders.size() > 0 ? allProviders.size() * 15 : 60;
+        // Sort livePatientFlow by ID desc so newest are first
+        livePatientFlow.sort((x, y) -> Long.compare(y.getId(), x.getId()));
+
+        // Total capacity dynamically scales with timeframe
+        int baseDailyCapacity = allProviders.size() > 0 ? allProviders.size() * 15 : 60;
+        int totalCapacity;
+        String normalizedFilter = timeFilter != null ? timeFilter.trim().toLowerCase() : "all time";
+        switch (normalizedFilter) {
+            case "today":
+                totalCapacity = baseDailyCapacity;
+                break;
+            case "last 7 days":
+                totalCapacity = baseDailyCapacity * 7;
+                break;
+            case "last 30 days":
+                totalCapacity = baseDailyCapacity * 30;
+                break;
+            case "this quarter":
+                totalCapacity = baseDailyCapacity * 90;
+                break;
+            case "this year":
+                totalCapacity = baseDailyCapacity * 365;
+                break;
+            case "all time":
+            default:
+                totalCapacity = Math.max(baseDailyCapacity * 30, periodVolume + 10);
+                break;
+        }
 
         List<ProviderStatusDTO> providerMatrix = new ArrayList<>();
-        Tenant tenant = admin.getTenant();
-        boolean isClinic = tenant != null && "Clinic".equalsIgnoreCase(tenant.getOrganizationType());
         String defaultRole = "Department Faculty";
         if (isClinic) {
             defaultRole = "General Physician";
@@ -456,15 +512,17 @@ public class AdminService {
         }
 
         return AdminDashboardStatsDTO.builder()
-                .todayVolume(todayVolume)
+                .todayVolume(periodVolume)
                 .totalCapacity(totalCapacity)
                 .activeInClinic(activeInClinic)
                 .waitingPatients(waitingPatients)
                 .inConsultPatients(inConsultPatients)
                 .esewaSettled(esewaSettled)
                 .stripeConnect(stripeConnect)
+                .cashSettled(cashSettled)
                 .esewaWeeklyVolume(esewaWeeklyVolume)
                 .stripeWeeklyVolume(stripeWeeklyVolume)
+                .cashWeeklyVolume(cashWeeklyVolume)
                 .livePatientFlow(livePatientFlow)
                 .weeklyAppointments(weeklyAppointments)
                 .providerMatrix(providerMatrix)
@@ -472,6 +530,28 @@ public class AdminService {
                 .organizationName(admin.getTenant() != null ? admin.getTenant().getOrganizationName() : null)
                 .organizationType(admin.getTenant() != null ? admin.getTenant().getOrganizationType() : null)
                 .build();
+    }
+
+    private LocalDate parseAdminTimeFilter(String timeFilter) {
+        if (timeFilter == null) return null;
+        String normalized = timeFilter.trim().toLowerCase();
+        LocalDate today = LocalDate.now();
+        switch (normalized) {
+            case "today":
+                return today;
+            case "last 7 days":
+                return today.minusDays(7);
+            case "last 30 days":
+                return today.minusDays(30);
+            case "this quarter":
+                int firstMonthOfQuarter = ((today.getMonthValue() - 1) / 3) * 3 + 1;
+                return LocalDate.of(today.getYear(), firstMonthOfQuarter, 1);
+            case "this year":
+                return LocalDate.of(today.getYear(), 1, 1);
+            case "all time":
+            default:
+                return null;
+        }
     }
 
     public List<CRMPatientDTO> getAllPatients(String adminEmail) {
@@ -658,6 +738,47 @@ public class AdminService {
         updateAppointmentStatus(appointmentId, "CANCELLED", adminEmail);
     }
 
+    public void recordAppointmentPayment(Long appointmentId, String paymentMethod, String paymentStatus, Double amount, String adminEmail) {
+        User admin = userRepository.findByEmail(adminEmail)
+                .orElseThrow(() -> new RuntimeException("Admin not found"));
+
+        if (admin.getTenant() == null) {
+            throw new RuntimeException("Admin is not associated with any organization.");
+        }
+
+        checkSubscriptionAccess(admin.getTenant());
+
+        Appointment appointment = appointmentRepository.findById(appointmentId)
+                .orElseThrow(() -> new RuntimeException("Appointment not found"));
+
+        if (!appointment.getTenantId().equals(admin.getTenant().getId())) {
+            throw new RuntimeException("Unauthorized: Appointment belongs to a different organization");
+        }
+
+        String sanitizedMethod = (paymentMethod != null && !paymentMethod.trim().isEmpty())
+                ? paymentMethod.trim().toUpperCase()
+                : "CASH";
+        String sanitizedStatus = (paymentStatus != null && !paymentStatus.trim().isEmpty())
+                ? paymentStatus.trim().toUpperCase()
+                : "SUCCESS";
+
+        if ("PAID".equals(sanitizedStatus)) {
+            sanitizedStatus = "SUCCESS";
+        }
+
+        appointment.setPaymentMethod(sanitizedMethod);
+        appointment.setPaymentStatus(sanitizedStatus);
+        if (amount != null && amount >= 0) {
+            appointment.setPrice(amount);
+        }
+
+        if (appointment.getTransactionId() == null || appointment.getTransactionId().trim().isEmpty()) {
+            appointment.setTransactionId("REC-" + sanitizedMethod + "-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase());
+        }
+
+        appointmentRepository.save(appointment);
+    }
+
     private AdminAppointmentDTO mapToAdminAppointmentDTO(Appointment a, User admin) {
         String initials = "XX";
         if (a.getPatientName() != null && !a.getPatientName().isEmpty()) {
@@ -730,6 +851,21 @@ public class AdminService {
                 ? a.getBookedByRole()
                 : customerRole;
 
+        String pm = a.getPaymentMethod() != null ? a.getPaymentMethod().toUpperCase() : "N/A";
+        String ps = a.getPaymentStatus() != null ? a.getPaymentStatus().toUpperCase() : "UNPAID";
+        String billingStatus = "Pending";
+        if ("PAID".equals(ps) || "SUCCESS".equals(ps)) {
+            if (pm.contains("ESEWA")) {
+                billingStatus = "[eSewa Verified]";
+            } else if (pm.contains("STRIPE")) {
+                billingStatus = "[Stripe Verified]";
+            } else if (pm.contains("CASH")) {
+                billingStatus = "[Cash Verified]";
+            } else {
+                billingStatus = "[Verified]";
+            }
+        }
+
         return AdminAppointmentDTO.builder()
                 .id(String.valueOf(a.getId()))
                 .patientName(a.getPatientName())
@@ -745,6 +881,8 @@ public class AdminService {
                 .department(a.getServiceName() != null ? a.getServiceName() : "General")
                 .status(a.getAppointmentStatus() != null ? a.getAppointmentStatus() : "SCHEDULED")
                 .paymentStatus(a.getPaymentStatus() != null ? a.getPaymentStatus() : "UNPAID")
+                .paymentMethod(a.getPaymentMethod())
+                .billingStatus(billingStatus)
                 .appointmentType(a.getAppointmentType() != null ? a.getAppointmentType() : "IN_PERSON")
                 .meetingLink(a.getMeetingLink())
                 .videoCallEnabled(Boolean.TRUE.equals(a.getVideoCallEnabled()) || "VIRTUAL".equalsIgnoreCase(a.getAppointmentType()))
@@ -768,6 +906,10 @@ public class AdminService {
                 .cancelledAt(a.getCancelledAt() != null ? a.getCancelledAt().toString() : null)
                 .cancelledByName(a.getCancelledByName())
                 .cancelledByRole(a.getCancelledByRole())
+                .rejectedAt(a.getRejectedAt() != null ? a.getRejectedAt().toString() : null)
+                .rejectedByName(a.getRejectedByName())
+                .rejectedByRole(a.getRejectedByRole())
+                .rejectionReason(a.getRejectionReason())
                 .treatmentSummary(a.getTreatmentSummary())
                 .internalNotes(a.getInternalNotes())
                 .patientRating(a.getPatientRating())

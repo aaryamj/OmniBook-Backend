@@ -172,7 +172,7 @@ public class RevenueAnalyticsService {
                             : order.getCreatedAt().toLocalDate();
                     LocalDate expiry = order.getSubscriptionExpiryDate() != null 
                             ? order.getSubscriptionExpiryDate() 
-                            : ("annually".equalsIgnoreCase(order.getBillingCycle()) ? start.plusYears(1) : start.plusMonths(1));
+                            : (SubscriptionService.isAnnualCycle(order.getBillingCycle()) ? start.plusYears(1) : start.plusMonths(1));
 
                     if (!targetDay.isBefore(start) && !targetDay.isAfter(expiry)) {
                         String cycle = order.getBillingCycle() != null ? order.getBillingCycle().toLowerCase() : "";

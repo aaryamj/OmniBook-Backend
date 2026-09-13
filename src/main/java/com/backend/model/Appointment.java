@@ -75,7 +75,7 @@ public class Appointment {
     private String transactionId; // Reference ID from payment gateway
     
     @Column(nullable = false)
-    private String appointmentStatus = "PENDING_APPROVAL"; // PENDING_APPROVAL, SCHEDULED, CHECKED_IN, COMPLETED, CANCELLED
+    private String appointmentStatus = "PENDING_APPROVAL"; // PENDING_APPROVAL, SCHEDULED, CHECKED_IN, COMPLETED, CANCELLED, REJECTED, NO_SHOW
 
     private LocalDateTime createdAt;
     
@@ -122,6 +122,14 @@ public class Appointment {
     private LocalDateTime cancelledAt;
     private String cancellationReason;
 
+    // Provider Rejection tracking & audit
+    private String rejectedByName;
+    private String rejectedByRole;
+    private Long rejectedByUserId;
+    private LocalDateTime rejectedAt;
+    @Column(columnDefinition = "TEXT")
+    private String rejectionReason;
+
     // Rescheduling tracking
     @Builder.Default
     private Integer rescheduleCount = 0;
@@ -152,6 +160,8 @@ public class Appointment {
     private Double remainingOrgAmount; // Gross Remaining Organization Amount
     private Double netRetainedAmount; // Gross Booking Amount - Refund Amount
     private Double gatewayFeeAmount; // Applicable gateway fee
+    private Long dailySettlementId; // ID of the daily settlement batch this appointment belongs to
+    private LocalDate settlementBatchDate; // Calendar date of the settlement batch
 
     @Transient
     private String patientProfilePicture;

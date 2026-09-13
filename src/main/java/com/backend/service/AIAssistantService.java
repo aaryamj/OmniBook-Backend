@@ -12,9 +12,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -55,48 +58,51 @@ public class AIAssistantService {
                 .build();
         chatMessageRepository.save(userMsg);
 
-        // 3. Resolve Target Organization and Service dynamically from User Intent &
-        // Context
+        // 3. Resolve Target Organization and Service dynamically from User Intent & Multi-Turn Context
         ResolvedTarget target = resolveTarget(userText, conversation.getSummary(), request.getSelectedClinic(),
                 request.getSelectedService());
         Tenant selectedTenant = target.tenant;
         String activeService = target.service;
 
-        // Persist active tenant/service in conversation summary for multi-turn memory
-        if (selectedTenant != null) {
+        // Persist active category/tenant/service/provider, date, time and current stage in conversation summary
+        String updatedSummary = updateConversationState(
+                conversation.getSummary(),
+                target.category,
+                selectedTenant != null ? selectedTenant.getId() : null,
+                activeService,
+                target.provider != null ? target.provider.getId() : null,
+                target.date,
+                target.time,
+                target.step);
+        conversation.setSummary(updatedSummary);
+
+        // Check plan restriction if tenant is selected
+        if (selectedTenant != null && !isAiEnabled(selectedTenant) && target.step >= 3) {
+            String orgName = selectedTenant.getOrganizationName();
             String tier = selectedTenant.getSubscriptionTier() != null ? selectedTenant.getSubscriptionTier() : "Starter";
-            boolean isExpiredOrSuspended = "EXPIRED".equalsIgnoreCase(selectedTenant.getSubscriptionStatus()) 
-                    || "SUSPENDED".equalsIgnoreCase(selectedTenant.getSubscriptionStatus())
-                    || (selectedTenant.getSubscriptionExpiryDate() != null && LocalDate.now().isAfter(selectedTenant.getSubscriptionExpiryDate()));
-            boolean hasAiBooking = !isExpiredOrSuspended && ("Professional".equalsIgnoreCase(tier) || "Enterprise".equalsIgnoreCase(tier));
+            String msg = "This organization (" + orgName + ") is currently on the " + tier 
+                    + " Plan (Classic Calendar scheduling only). Please switch to the Classic Calendar tab to book with " + orgName 
+                    + ", or I can help you find available appointments at our partner organizations that support Smart AI Booking.";
+            
+            AIChatMessage aiMsg = AIChatMessage.builder()
+                    .conversation(conversation)
+                    .role("ai")
+                    .content(msg)
+                    .actionSlotId(null)
+                    .actionType("PLAN_RESTRICTION")
+                    .isSummarized(false)
+                    .build();
+            chatMessageRepository.save(aiMsg);
 
-            if (!hasAiBooking) {
-                String orgName = selectedTenant.getOrganizationName();
-                String msg = "Smart AI Booking is available for organizations on the Professional & Enterprise tiers. "
-                        + orgName + " is currently on the " + tier + " Plan with standard calendar scheduling. Please switch to the Classic Calendar to book your slot.";
-                
-                AIChatMessage aiMsg = AIChatMessage.builder()
-                        .conversation(conversation)
-                        .role("ai")
-                        .content(msg)
-                        .actionSlotId(null)
-                        .actionType("PLAN_RESTRICTION")
-                        .isSummarized(false)
-                        .build();
-                chatMessageRepository.save(aiMsg);
-
-                return AIChatResponseDTO.builder()
-                        .conversationId(conversation.getConversationId())
-                        .responseText(msg)
-                        .actionSlotId(null)
-                        .actionType("PLAN_RESTRICTION")
-                        .recommendedSlots(Collections.emptyList())
-                        .build();
-            }
-
-            String updatedSummary = updateConversationState(conversation.getSummary(), selectedTenant.getId(),
-                    activeService);
-            conversation.setSummary(updatedSummary);
+            return AIChatResponseDTO.builder()
+                    .conversationId(conversation.getConversationId())
+                    .responseText(msg)
+                    .actionSlotId(null)
+                    .actionType("PLAN_RESTRICTION")
+                    .recommendedSlots(Collections.emptyList())
+                    .currentStep(3)
+                    .quickReplies(List.of("Switch to Classic Calendar", "Choose another organization", "Start Over"))
+                    .build();
         }
 
         String userEmail = conversation.getUserEmail();
@@ -111,27 +117,33 @@ public class AIAssistantService {
         // 5. Analyze user appointment history and habits
         PatientAppointmentPatternDTO pattern = historyAnalyticsService.analyzePatientHistory(userEmail);
 
-        // 6. Retrieve strictly verified available, non-conflicting bookable slots for
-        // the RESOLVED tenant
-        String targetClinicId = selectedTenant != null ? selectedTenant.getId().toString()
-                : request.getSelectedClinic();
-        List<AISlotDTO> availableSlots = slotAvailabilityService.getVerifiedAvailableSlots(
-                pattern,
-                targetClinicId,
-                request.getSelectedProvider(),
-                activeService);
+        // 6. Retrieve strictly verified available, non-conflicting bookable slots ONLY if at step 4 or 5
+        ZoneId ZONE_KATHMANDU = ZoneId.of("Asia/Kathmandu");
+        LocalDate today = LocalDate.now(ZONE_KATHMANDU);
 
-        // 7. Construct multi-type organization human-like prompt with strict
-        // anti-hallucination constraints
+        String targetProviderId = target.provider != null ? target.provider.getId().toString()
+                : request.getSelectedProvider();
+
+        List<AISlotDTO> availableSlots = Collections.emptyList();
+        if (target.step >= 4 && selectedTenant != null && isAiEnabled(selectedTenant)) {
+            availableSlots = slotAvailabilityService.getVerifiedAvailableSlots(
+                    pattern,
+                    selectedTenant.getId().toString(),
+                    targetProviderId,
+                    activeService,
+                    target.category,
+                    target.date != null ? target.date : (target.isAskingToday ? today : null));
+        }
+
+        // 7. Construct multi-type organization human-like prompt with strict anti-hallucination constraints
         String systemInstruction = buildSystemPrompt(conversation, pattern, availableSlots, selectedTenant,
-                userAppointments);
+                userAppointments, target);
 
         // 8. Retrieve active context (bounded strictly to the last 20 turns)
         List<Map<String, Object>> activeContents = tokenContextManagerService
                 .getActiveContextAndMaintainSummary(conversation);
 
-        // 9. Invoke Gemini 3.5 Flash-Lite (or fallback to intelligent conversational
-        // state engine)
+        // 9. Invoke Gemini 3.5 Flash-Lite (or fallback to intelligent conversational state engine)
         Optional<String> geminiResult = geminiClientService.generateChatResponse(systemInstruction, activeContents);
 
         String responseText;
@@ -139,17 +151,20 @@ public class AIAssistantService {
         String actionType = "INFO_ONLY";
         Object actionPayload = null;
         String matchReason = !availableSlots.isEmpty() ? availableSlots.get(0).getMatchReason() : null;
+        int finalStep = target.step;
+        List<String> finalQuickReplies = target.quickReplies;
 
         if (geminiResult.isPresent() && !geminiResult.get().trim().isEmpty()) {
             responseText = geminiResult.get();
 
-            // Extract slot recommendation action: [ACTION:SELECT_SLOT:X] or legacy
-            // [BOOK_SLOT_ID:X]
+            // Extract slot recommendation action: [ACTION:SELECT_SLOT:X] or legacy [BOOK_SLOT_ID:X]
             Pattern slotPattern = Pattern.compile("\\[(?:ACTION:SELECT_SLOT|BOOK_SLOT_ID):(\\d+)\\]");
             Matcher slotMatcher = slotPattern.matcher(responseText);
             if (slotMatcher.find()) {
                 actionSlotId = slotMatcher.group(1);
                 actionType = "SELECT_SLOT";
+                finalStep = 5;
+                finalQuickReplies = List.of("Select & Book Slot", "Choose another slot");
                 responseText = responseText.replace(slotMatcher.group(0), "").trim();
             }
 
@@ -186,11 +201,13 @@ public class AIAssistantService {
         } else {
             // Intelligent Human-Friendly Conversational & Entity-Aware Fallback Engine
             HumanResponse humanResp = buildHumanFriendlyFallbackResponse(
-                    userText, pattern, availableSlots, selectedTenant, userAppointments, userEmail, activeService);
+                    userText, pattern, availableSlots, selectedTenant, userAppointments, userEmail, activeService, target);
             responseText = humanResp.text;
             actionSlotId = humanResp.slotId;
             actionType = humanResp.actionType;
             actionPayload = humanResp.actionPayload;
+            finalStep = humanResp.currentStep;
+            finalQuickReplies = humanResp.quickReplies;
         }
 
         // Clean up any remaining action tags or duplicate whitespace
@@ -213,7 +230,13 @@ public class AIAssistantService {
         conversation.setUpdatedAt(LocalDateTime.now());
         conversationRepository.save(conversation);
 
-        String orgTypeDisplay = selectedTenant != null ? selectedTenant.getOrganizationType() : "General";
+        String orgTypeDisplay = selectedTenant != null ? selectedTenant.getOrganizationType() 
+                : (target.category != null ? target.category : "General");
+
+        List<AISlotDTO> slotsToReturn = availableSlots;
+        if (finalStep < 5 || isGreetingOrCasual(userText) || "PLAN_RESTRICTION".equals(actionType)) {
+            slotsToReturn = Collections.emptyList();
+        }
 
         return AIChatResponseDTO.builder()
                 .conversationId(conversation.getConversationId())
@@ -223,8 +246,29 @@ public class AIAssistantService {
                 .actionPayload(actionPayload)
                 .organizationType(orgTypeDisplay)
                 .matchReason(matchReason)
-                .recommendedSlots(availableSlots)
+                .recommendedSlots(slotsToReturn)
+                .currentStep(finalStep)
+                .quickReplies(finalQuickReplies)
                 .build();
+    }
+
+    /**
+     * Recommends valid appointment slots tailored to user history.
+     */
+    public boolean isAiEnabled(Tenant t) {
+        if (t == null) return false;
+        String tier = t.getSubscriptionTier() != null ? t.getSubscriptionTier() : "Starter";
+        boolean isExpiredOrSuspended = "EXPIRED".equalsIgnoreCase(t.getSubscriptionStatus()) 
+                || "SUSPENDED".equalsIgnoreCase(t.getSubscriptionStatus())
+                || (t.getSubscriptionExpiryDate() != null && LocalDate.now().isAfter(t.getSubscriptionExpiryDate()));
+        return !isExpiredOrSuspended && ("Professional".equalsIgnoreCase(tier) || "Enterprise".equalsIgnoreCase(tier));
+    }
+
+    private boolean isGreetingOrCasual(String text) {
+        if (text == null) return false;
+        String t = text.trim().toLowerCase();
+        return t.matches(".*\\b(hi|hello|hey|heya|howdy|namaste|greetings|good\\s+(morning|afternoon|evening)|sup|what's up|whats up)\\b.*")
+                || t.contains("how are you") || t.contains("are you there") || t.contains("can you help");
     }
 
     /**
@@ -235,15 +279,8 @@ public class AIAssistantService {
             try {
                 Long tid = Long.parseLong(clinicId.trim());
                 Tenant t = tenantRepository.findById(tid).orElse(null);
-                if (t != null) {
-                    String tier = t.getSubscriptionTier() != null ? t.getSubscriptionTier() : "Starter";
-                    boolean isExpiredOrSuspended = "EXPIRED".equalsIgnoreCase(t.getSubscriptionStatus()) 
-                            || "SUSPENDED".equalsIgnoreCase(t.getSubscriptionStatus())
-                            || (t.getSubscriptionExpiryDate() != null && LocalDate.now().isAfter(t.getSubscriptionExpiryDate()));
-                    boolean hasAi = !isExpiredOrSuspended && ("Professional".equalsIgnoreCase(tier) || "Enterprise".equalsIgnoreCase(tier));
-                    if (!hasAi) {
-                        return Collections.emptyList();
-                    }
+                if (t != null && !isAiEnabled(t)) {
+                    return Collections.emptyList();
                 }
             } catch (Exception ignored) {}
         }
@@ -252,116 +289,381 @@ public class AIAssistantService {
     }
 
     private static class ResolvedTarget {
+        String category; // "College", "Clinic", "Saloon", "Fitness"
         Tenant tenant;
+        String location;
         String service;
+        User provider;
+        LocalDate date;
+        String time;
+        boolean isAskingToday;
+        int step;
+        List<String> quickReplies;
 
-        ResolvedTarget(Tenant tenant, String service) {
+        ResolvedTarget(String category, Tenant tenant, String location, String service, User provider, LocalDate date, String time, boolean isAskingToday, int step, List<String> quickReplies) {
+            this.category = category;
             this.tenant = tenant;
+            this.location = location;
             this.service = service;
+            this.provider = provider;
+            this.date = date;
+            this.time = time;
+            this.isAskingToday = isAskingToday;
+            this.step = step;
+            this.quickReplies = quickReplies;
         }
     }
 
+    private static boolean matchOrgType(String tType, String cat) {
+        if (tType == null || cat == null) return false;
+        String t = tType.trim().toLowerCase();
+        String c = cat.trim().toLowerCase();
+        if (c.contains("college") || c.contains("acad") || c.contains("educ") || c.contains("school")) {
+            return t.contains("college") || t.contains("acad") || t.contains("educ") || t.contains("school");
+        }
+        if (c.contains("salon") || c.contains("saloon") || c.contains("spa") || c.contains("beauty")) {
+            return t.contains("salon") || t.contains("saloon") || t.contains("spa") || t.contains("beauty");
+        }
+        if (c.contains("gym") || c.contains("fitness")) {
+            return t.contains("gym") || t.contains("fitness");
+        }
+        if (c.contains("clinic") || c.contains("hosp") || c.contains("health") || c.contains("medic")) {
+            return t.contains("clinic") || t.contains("hosp") || t.contains("health") || t.contains("medic");
+        }
+        return t.equalsIgnoreCase(c);
+    }
+
+    private static String getCategoryLabel(String cat) {
+        if (cat == null) return "Organization";
+        String c = cat.toLowerCase();
+        if (c.contains("college") || c.contains("acad") || c.contains("educ") || c.contains("school")) return "Education / College";
+        if (c.contains("salon") || c.contains("saloon") || c.contains("spa") || c.contains("beauty")) return "Beauty / Salon & Spa";
+        if (c.contains("gym") || c.contains("fitness")) return "Fitness & Gym";
+        if (c.contains("clinic") || c.contains("hosp") || c.contains("health") || c.contains("medic")) return "Healthcare / Clinic";
+        return cat;
+    }
+
+    private String findMatchingService(List<String> services, String... keywords) {
+        for (String kw : keywords) {
+            for (String s : services) {
+                if (s.toLowerCase().contains(kw.toLowerCase())) {
+                    return s;
+                }
+            }
+        }
+        return null;
+    }
+
     /**
-     * Intelligently discovers organization and service from user text or
-     * conversation memory.
+     * Resolves conversational booking state strictly across 5 sequential steps:
+     * Step 1: Select Organization Type (Category)
+     * Step 2: Select Organization or Location
+     * Step 3: Select Service
+     * Step 4: Display Available Dates & Time Slots
+     * Step 5: Pick Slot & Proceed to Payment
+     *
+     * Guarantees ZERO cross-organization interference.
      */
     private ResolvedTarget resolveTarget(String userText, String summary, String requestClinicId,
             String requestService) {
         String lower = userText != null ? userText.toLowerCase() : "";
+
+        boolean isAskingToday = lower.matches(".*\\b(today|tonight|right now|this morning|this afternoon|this evening)\\b.*");
+
+        String prevCategory = null;
+        Long prevTenantId = null;
+        String prevService = null;
+        Long prevProviderId = null;
+        LocalDate prevDate = null;
+        String prevTime = null;
+        int prevStage = 1;
+
+        if (summary != null) {
+            Matcher mc = Pattern.compile("\\[ACTIVE_CATEGORY:([^\\]]+)\\]").matcher(summary);
+            if (mc.find()) prevCategory = mc.group(1).trim();
+
+            Matcher mt = Pattern.compile("\\[ACTIVE_TENANT:(\\d+)\\]").matcher(summary);
+            if (mt.find()) {
+                try { prevTenantId = Long.parseLong(mt.group(1)); } catch (Exception ignored) {}
+            }
+
+            Matcher ms = Pattern.compile("\\[ACTIVE_SERVICE:([^\\]]+)\\]").matcher(summary);
+            if (ms.find()) prevService = ms.group(1).trim();
+
+            Matcher mp = Pattern.compile("\\[ACTIVE_PROVIDER:(\\d+)\\]").matcher(summary);
+            if (mp.find()) {
+                try { prevProviderId = Long.parseLong(mp.group(1)); } catch (Exception ignored) {}
+            }
+
+            Matcher md = Pattern.compile("\\[ACTIVE_DATE:([^\\]]+)\\]").matcher(summary);
+            if (md.find()) {
+                try { prevDate = LocalDate.parse(md.group(1).trim()); } catch (Exception ignored) {}
+            }
+
+            Matcher mtime = Pattern.compile("\\[ACTIVE_TIME:([^\\]]+)\\]").matcher(summary);
+            if (mtime.find()) {
+                prevTime = mtime.group(1).trim();
+            }
+
+            Matcher mst = Pattern.compile("\\[STAGE:(\\d+)\\]").matcher(summary);
+            if (mst.find()) {
+                try { prevStage = Integer.parseInt(mst.group(1)); } catch (Exception ignored) {}
+            }
+        }
+
+        // Check if user wants to reset / start over
+        if (lower.contains("start over") || lower.contains("restart") || lower.contains("reset") || lower.contains("book another")) {
+            return new ResolvedTarget(null, null, null, null, null, null, null, false, 1, 
+                    List.of("Education / College", "Healthcare / Clinic", "Beauty / Salon & Spa", "Fitness & Gym"));
+        }
+
+        // Check if user wants to change date or time
+        if (lower.contains("change date") || lower.contains("different date") || lower.contains("another date") || lower.contains("pick another date") || lower.contains("choose another date")) {
+            prevDate = null;
+            prevTime = null;
+        }
+        if (lower.contains("change time") || lower.contains("different time") || lower.contains("another time") || lower.contains("choose another time")) {
+            prevTime = null;
+        }
+
+        // 1. Detect Category in user text
+        String detectedCategory = null;
+        if (lower.contains("college") || lower.contains("university") || lower.contains("academic") 
+                || lower.contains("education") || lower.contains("student") || lower.contains("school") || lower.contains("academy")) {
+            detectedCategory = "College";
+        } else if (lower.contains("salon") || lower.contains("saloon") || lower.contains("haircut") 
+                || lower.contains("styling") || lower.contains("spa") || lower.contains("beauty") 
+                || lower.contains("beard") || lower.contains("shave") || lower.contains("facial")) {
+            detectedCategory = "Saloon";
+        } else if (lower.contains("gym") || lower.contains("fitness") || lower.contains("workout") 
+                || lower.contains("trainer") || lower.contains("coach")) {
+            detectedCategory = "Fitness";
+        } else if (lower.contains("clinic") || lower.contains("hospital") || lower.contains("doctor") 
+                || lower.contains("healthcare") || lower.contains("medical") || lower.contains("patient") 
+                || lower.contains("eye hospital") || lower.contains("dentist")) {
+            detectedCategory = "Clinic";
+        }
+
+        // Handle category switching: If user explicitly switches category, clear previous tenant, service, date, time!
+        if (detectedCategory != null && prevCategory != null && !matchOrgType(prevCategory, detectedCategory)) {
+            prevTenantId = null;
+            prevService = null;
+            prevProviderId = null;
+            prevDate = null;
+            prevTime = null;
+        }
+
+        String activeCategory = detectedCategory != null ? detectedCategory : prevCategory;
+
+        // 2. Detect location in user text
+        String detectedLocation = null;
+        String[] locations = {"lalitpur", "kathmandu", "bhaktapur", "biratnagar", "siraha", "janakpur", "saptari", "khotang", "lamjung", "surkhet", "pokhara", "chitwan"};
+        for (String loc : locations) {
+            if (lower.contains(loc)) {
+                detectedLocation = loc;
+                break;
+            }
+        }
+
+        // 3. Detect organization name
         List<Tenant> activeTenants = tenantRepository.findByStatus("ACTIVE");
-
         Tenant detectedTenant = null;
-        String detectedService = null;
 
-        // 1. Direct match on organization name in user text
+        // Direct name match on active tenants (strictly filtered by active category if known)
         for (Tenant t : activeTenants) {
-            String orgName = t.getOrganizationName().toLowerCase();
+            if (activeCategory != null && !matchOrgType(t.getOrganizationType(), activeCategory)) {
+                continue; // Prevent cross-category interference!
+            }
+            String orgName = t.getOrganizationName().toLowerCase().trim();
             if (lower.contains(orgName)) {
                 detectedTenant = t;
                 break;
             }
         }
 
-        // 2. Keyword industry match if name was not explicitly stated
-        if (detectedTenant == null) {
-            if (lower.contains("haircut") || lower.contains("styling") || lower.contains("hair")
-                    || lower.contains("salon") || lower.contains("saloon") || lower.contains("spa")
-                    || lower.contains("beard") || lower.contains("shave")) {
-                detectedTenant = findTenantByType(activeTenants, "Saloon", "Salon");
-                detectedService = "Initial Hair styling";
-            } else if (lower.contains("college") || lower.contains("university") || lower.contains("advising")
-                    || lower.contains("student") || lower.contains("lecture") || lower.contains("faculty")
-                    || lower.contains("lab hour")) {
-                detectedTenant = findTenantByType(activeTenants, "College", "Academy");
-                detectedService = "Academic Advising";
-            } else if (lower.contains("gym") || lower.contains("fitness") || lower.contains("workout")
-                    || lower.contains("trainer")) {
-                detectedTenant = findTenantByType(activeTenants, "Fitness", "Gym");
-            } else if (lower.contains("eye") || lower.contains("lens") || lower.contains("cataract")
-                    || lower.contains("vision")) {
-                detectedTenant = findTenantByNameKeyword(activeTenants, "Eye");
-                detectedService = "Contact Lens Examination";
-            }
-        }
-
-        // 3. Fallback to conversation memory if user didn't mention an organization
-        if (detectedTenant == null && summary != null) {
-            Pattern p = Pattern.compile("\\[ACTIVE_TENANT:(\\d+)\\]");
-            Matcher m = p.matcher(summary);
-            if (m.find()) {
-                try {
-                    Long tid = Long.parseLong(m.group(1));
-                    detectedTenant = tenantRepository.findById(tid).orElse(null);
-                } catch (Exception ignored) {
+        if (detectedTenant == null && prevTenantId != null) {
+            Tenant prevT = tenantRepository.findById(prevTenantId).orElse(null);
+            if (prevT != null) {
+                if (activeCategory == null || matchOrgType(prevT.getOrganizationType(), activeCategory)) {
+                    detectedTenant = prevT;
                 }
             }
         }
 
-        // 4. Fallback to frontend dropdown selection
-        if (detectedTenant == null && requestClinicId != null && !requestClinicId.trim().isEmpty()) {
-            try {
-                Long tid = Long.parseLong(requestClinicId.trim());
-                detectedTenant = tenantRepository.findById(tid).orElse(null);
-            } catch (Exception ignored) {
-            }
+        if (detectedTenant != null && prevTenantId != null && !detectedTenant.getId().equals(prevTenantId)) {
+            prevService = null;
+            prevProviderId = null;
+            prevDate = null;
+            prevTime = null;
         }
 
-        // If service is not detected yet, check request or default
-        if (detectedService == null && requestService != null && !requestService.trim().isEmpty()) {
-            detectedService = requestService.trim();
+        if (detectedTenant != null && activeCategory == null) {
+            activeCategory = detectedTenant.getOrganizationType();
         }
 
-        return new ResolvedTarget(detectedTenant, detectedService);
-    }
-
-    private Tenant findTenantByType(List<Tenant> tenants, String... types) {
-        for (String type : types) {
-            for (Tenant t : tenants) {
-                if (t.getOrganizationType() != null && t.getOrganizationType().equalsIgnoreCase(type)) {
-                    return t;
+        // 4. Detect provider
+        User detectedProvider = null;
+        if (detectedTenant != null) {
+            List<User> providers = userRepository.findByTenantIdAndRole(detectedTenant.getId(), "service_provider");
+            for (User p : providers) {
+                String pName = p.getFullName().toLowerCase();
+                String cleaned = pName.replaceAll("^(dr\\.?|prof\\.?|mr\\.?|ms\\.?|mrs\\.?)\\s+", "").trim();
+                if (lower.contains(pName) || (cleaned.length() >= 3 && lower.contains(cleaned))) {
+                    detectedProvider = p;
+                    break;
                 }
             }
         }
-        return null;
-    }
+        if (detectedProvider == null && prevProviderId != null && detectedTenant != null) {
+            detectedProvider = userRepository.findById(prevProviderId).orElse(null);
+        }
 
-    private Tenant findTenantByNameKeyword(List<Tenant> tenants, String keyword) {
-        for (Tenant t : tenants) {
-            if (t.getOrganizationName() != null
-                    && t.getOrganizationName().toLowerCase().contains(keyword.toLowerCase())) {
-                return t;
+        // 5. Detect service
+        String detectedService = null;
+        if (detectedTenant != null) {
+            List<String> distinctServices = providerServiceRepository.findDistinctServiceNamesByTenantId(detectedTenant.getId());
+            for (String sName : distinctServices) {
+                if (lower.contains(sName.toLowerCase())) {
+                    detectedService = sName;
+                    break;
+                }
+            }
+
+            if (detectedService == null) {
+                String orgType = detectedTenant.getOrganizationType() != null ? detectedTenant.getOrganizationType() : "";
+                if (matchOrgType(orgType, "College")) {
+                    if (lower.contains("advising") || lower.contains("academic")) {
+                        detectedService = findMatchingService(distinctServices, "advising", "academic");
+                    } else if (lower.contains("consultation") || lower.contains("faculty")) {
+                        detectedService = findMatchingService(distinctServices, "consultation", "faculty");
+                    } else if (lower.contains("career") || lower.contains("counseling")) {
+                        detectedService = findMatchingService(distinctServices, "career", "counseling");
+                    }
+                } else if (matchOrgType(orgType, "Saloon")) {
+                    if (lower.contains("haircut") || lower.contains("hair") || lower.contains("styling")) {
+                        detectedService = findMatchingService(distinctServices, "hair", "styling");
+                    } else if (lower.contains("facial") || lower.contains("spa")) {
+                        detectedService = findMatchingService(distinctServices, "facial", "spa");
+                    }
+                } else if (matchOrgType(orgType, "Clinic")) {
+                    if (lower.contains("checkup") || lower.contains("joint") || lower.contains("check")) {
+                        detectedService = findMatchingService(distinctServices, "checkup", "joint", "check");
+                    }
+                }
             }
         }
-        return null;
+
+        if (detectedService == null && prevService != null) {
+            detectedService = prevService;
+        }
+
+        if (detectedService != null && prevService != null && !detectedService.equalsIgnoreCase(prevService)) {
+            prevDate = null;
+            prevTime = null;
+        }
+
+        // 6. Detect Date and Time
+        ZoneId ZONE_KATHMANDU = ZoneId.of("Asia/Kathmandu");
+        LocalDate today = LocalDate.now(ZONE_KATHMANDU);
+
+        LocalDate detectedDate = parseUserDate(userText, today);
+        if (detectedDate == null) {
+            detectedDate = prevDate;
+        }
+
+        String detectedTime = parseUserTime(userText);
+        if (detectedTime == null) {
+            detectedTime = prevTime;
+        }
+
+        // Determine Conversational Step (1 to 5)
+        int step = 1;
+        List<String> quickReplies = new ArrayList<>();
+
+        if (activeCategory == null && detectedTenant == null) {
+            step = 1;
+            quickReplies = List.of("Education / College", "Healthcare / Clinic", "Beauty / Salon & Spa", "Fitness & Gym");
+        } else if (detectedTenant == null) {
+            step = 2;
+            final String finalCat = activeCategory;
+            final String finalLoc = detectedLocation;
+            List<Tenant> catTenants = tenantRepository.findByStatus("ACTIVE").stream()
+                    .filter(t -> matchOrgType(t.getOrganizationType(), finalCat))
+                    .filter(t -> finalLoc == null || (t.getAddress() != null && t.getAddress().toLowerCase().contains(finalLoc)))
+                    .collect(Collectors.toList());
+            quickReplies = catTenants.stream().map(Tenant::getOrganizationName).collect(Collectors.toList());
+            if (quickReplies.isEmpty()) {
+                quickReplies = tenantRepository.findByStatus("ACTIVE").stream()
+                        .filter(t -> matchOrgType(t.getOrganizationType(), finalCat))
+                        .map(Tenant::getOrganizationName)
+                        .collect(Collectors.toList());
+            }
+        } else if (detectedService == null) {
+            step = 3;
+            quickReplies = providerServiceRepository.findDistinctServiceNamesByTenantId(detectedTenant.getId());
+            if (quickReplies.isEmpty()) {
+                quickReplies = List.of("General Consultation");
+            }
+        } else if (detectedDate == null) {
+            // STEP 4: Choose Date (Allow any future date, list real upcoming open operating dates)
+            step = 4;
+            List<LocalDate> openDates = slotAvailabilityService.getAvailableDatesForService(
+                    detectedTenant.getId(),
+                    detectedProvider != null ? detectedProvider.getId() : null,
+                    detectedService);
+            DateTimeFormatter chipFmt = DateTimeFormatter.ofPattern("EEE, MMM d");
+            quickReplies = new ArrayList<>();
+            for (int i = 0; i < Math.min(6, openDates.size()); i++) {
+                LocalDate d = openDates.get(i);
+                if (d.isEqual(today)) {
+                    quickReplies.add("Today (" + d.format(DateTimeFormatter.ofPattern("MMM d")) + ")");
+                } else if (d.isEqual(today.plusDays(1))) {
+                    quickReplies.add("Tomorrow (" + d.format(DateTimeFormatter.ofPattern("MMM d")) + ")");
+                } else {
+                    quickReplies.add(d.format(chipFmt));
+                }
+            }
+            if (quickReplies.isEmpty()) {
+                quickReplies = List.of("Today (" + today.format(DateTimeFormatter.ofPattern("MMM d")) + ")",
+                        "Tomorrow (" + today.plusDays(1).format(DateTimeFormatter.ofPattern("MMM d")) + ")");
+            }
+        } else {
+            // STEP 5: Date selected -> check time and move to payment
+            step = 5;
+            quickReplies = List.of("Proceed to Booking & Payment", "Change time", "Change date");
+        }
+
+        return new ResolvedTarget(activeCategory, detectedTenant, detectedLocation, detectedService, detectedProvider, detectedDate, detectedTime, isAskingToday, step, quickReplies);
     }
 
-    private String updateConversationState(String summary, Long tenantId, String service) {
-        String base = summary != null ? summary.replaceAll("\\[ACTIVE_TENANT:\\d+\\]", "").trim() : "";
-        base += " [ACTIVE_TENANT:" + tenantId + "]";
+    private String updateConversationState(String summary, String category, Long tenantId, String service, Long providerId, LocalDate date, String time, int stage) {
+        String base = summary != null ? summary : "";
+        if (category != null) {
+            base = base.replaceAll("\\[ACTIVE_CATEGORY:[^\\]]+\\]", "").trim();
+            base += " [ACTIVE_CATEGORY:" + category + "]";
+        }
+        if (tenantId != null) {
+            base = base.replaceAll("\\[ACTIVE_TENANT:\\d+\\]", "").trim();
+            base += " [ACTIVE_TENANT:" + tenantId + "]";
+        }
         if (service != null && !service.isEmpty()) {
             base = base.replaceAll("\\[ACTIVE_SERVICE:[^\\]]+\\]", "").trim();
             base += " [ACTIVE_SERVICE:" + service + "]";
         }
+        if (providerId != null) {
+            base = base.replaceAll("\\[ACTIVE_PROVIDER:\\d+\\]", "").trim();
+            base += " [ACTIVE_PROVIDER:" + providerId + "]";
+        }
+        if (date != null) {
+            base = base.replaceAll("\\[ACTIVE_DATE:[^\\]]+\\]", "").trim();
+            base += " [ACTIVE_DATE:" + date.toString() + "]";
+        }
+        if (time != null && !time.isEmpty()) {
+            base = base.replaceAll("\\[ACTIVE_TIME:[^\\]]+\\]", "").trim();
+            base += " [ACTIVE_TIME:" + time + "]";
+        }
+        base = base.replaceAll("\\[STAGE:\\d+\\]", "").trim();
+        base += " [STAGE:" + stage + "]";
         return base.trim();
     }
 
@@ -427,7 +729,8 @@ public class AIAssistantService {
             PatientAppointmentPatternDTO pattern,
             List<AISlotDTO> slots,
             Tenant selectedTenant,
-            List<Appointment> userAppointments) {
+            List<Appointment> userAppointments,
+            ResolvedTarget target) {
 
         StringBuilder sb = new StringBuilder();
 
@@ -437,7 +740,18 @@ public class AIAssistantService {
         sb.append(
                 "OmniBook is a unified multi-organization appointment management platform supporting Clinics & Hospitals, Salons & Spas, Colleges & Universities, Fitness Centers, and Professional Consulting Offices.\n\n");
 
-        // 2. Organization Context & Terminology
+        // 2. Strict 5-Step Flow & Anti-Interference Isolation
+        sb.append("MANDATORY 5-STEP CONVERSATIONAL WORKFLOW RULES (CRITICAL ANTI-INTERFERENCE):\n");
+        sb.append("Current Flow Step: ").append(target.step).append(" of 5\n");
+        sb.append("Active Category: ").append(target.category != null ? target.category : "Not chosen yet").append("\n");
+        sb.append("STRICT ISOLATION: Zero organization interference allowed. If user selected or asked about College, NEVER mention Clinic or Salon! Never mix organizations.\n");
+        sb.append("- Step 1: If no organization type is selected, warmly greet and ask user to choose Organization Type (Education / College, Healthcare / Clinic, Beauty / Salon & Spa, Fitness & Gym).\n");
+        sb.append("- Step 2: Once Organization Type is chosen, ask for preferred Location or Organization Name and present organizations matching that category.\n");
+        sb.append("- Step 3: Once a specific organization is chosen, present its available services and ask user to choose.\n");
+        sb.append("- Step 4: Once service is chosen, present verified available dates and time slots strictly for that organization and service.\n");
+        sb.append("- Step 5: When user picks a slot, confirm the appointment details and output '[ACTION:SELECT_SLOT:X]' to proceed to checkout and payment.\n\n");
+
+        // 3. Organization Context & Terminology
         if (selectedTenant != null) {
             OrganizationTerminology terms = OrganizationTerminology.from(selectedTenant.getOrganizationType());
             sb.append("CURRENT TARGET ORGANIZATION CONTEXT:\n");
@@ -452,45 +766,11 @@ public class AIAssistantService {
                     .append("', and bookings as '").append(terms.getAppointmentTerm()).append("'.\n\n");
         } else {
             sb.append("CURRENT ORGANIZATION CONTEXT:\n");
-            sb.append("- Multi-Organization Portal: The user has not selected a specific organization yet.\n");
-            sb.append(
-                    "- Available Organization Types: Clinics/Hospitals, Salons & Spas, Colleges & Academies, Fitness Centers, and Consulting Firms.\n");
-            sb.append("- Guide the user step-by-step to choose an organization or service.\n\n");
+            sb.append("- Multi-Organization Portal: User has not selected a specific organization yet.\n");
+            sb.append("- Follow the 5-step flow to guide the user step-by-step.\n\n");
         }
 
-        // 3. Conversational Guidelines
-        sb.append("CONVERSATIONAL RULES & HUMAN-LIKE BEHAVIOR:\n");
-        sb.append("1. GREETINGS & CASUAL OPENINGS:\n");
-        sb.append(
-                "   - When the user sends greetings or casual messages ('Hi', 'Hey', 'Good morning', 'Good afternoon', 'Good evening', 'How are you?', 'What's up?', 'Are you there?', 'Can you help me?', 'I need some help'):\n");
-        sb.append("   - Respond warmly, naturally, and conversationally like a helpful human receptionist.\n");
-        sb.append("   - Match the time of day if they say Good morning/afternoon/evening.\n");
-        sb.append(
-                "   - Ask how you can assist them with booking, rescheduling, checking, or cancelling an appointment.\n");
-        sb.append("   - CRITICAL: NEVER dump a list of slots on a simple greeting or general question!\n\n");
-
-        sb.append("2. STEP-BY-STEP MISSING INFORMATION GATHERING:\n");
-        sb.append(
-                "   - When a user says 'I need a haircut at Ram Saloon' without giving a date/time, DO NOT dump unrelated slots. Acknowledge Ram Saloon and ask what day and time (morning, afternoon, evening) they prefer!\n");
-        sb.append(
-                "   - Ask for missing details one step at a time: organization/service -> preferred day/time -> verified open slots.\n\n");
-
-        sb.append("3. APPOINTMENT OPERATIONS (BOOK, RESCHEDULE, CANCEL, STATUS):\n");
-        sb.append(
-                "   - View Upcoming: If user asks 'What are my appointments?' or 'Check status', summarize their real appointments from the USER'S EXISTING APPOINTMENTS section below.\n");
-        sb.append("   - Cancel: If user asks to cancel an appointment:\n");
-        sb.append("     - If multiple appointments exist, ask which one they want to cancel.\n");
-        sb.append(
-                "     - When the user confirms ('Yes, cancel appointment #X'), output '[ACTION:CANCEL_APPOINTMENT:X]' in your response so the backend executes the cancellation.\n");
-        sb.append("   - Recommending a slot to book: Include '[ACTION:SELECT_SLOT:X]' where X is the slot number.\n\n");
-
-        sb.append("4. CRITICAL ANTI-HALLUCINATION POLICY:\n");
-        sb.append("   - You must NEVER fabricate or assume appointment dates, times, providers, or slots.\n");
-        sb.append("   - Real-time database availability and records below are the SOLE source of truth.\n");
-        sb.append(
-                "   - If a requested time is not in the inventory, inform the user honestly and suggest the closest available verified slot.\n\n");
-
-        // 4. User's Existing Appointments (Real-time DB Ground Truth)
+        // 4. User's Existing Appointments
         sb.append("USER'S EXISTING APPOINTMENTS (Real-time database records):\n");
         LocalDate today = LocalDate.now();
         List<Appointment> upcoming = userAppointments.stream()
@@ -506,32 +786,13 @@ public class AIAssistantService {
                         .append(": ").append(a.getServiceName() != null ? a.getServiceName() : "Service")
                         .append(" on ").append(a.getAppointmentDate())
                         .append(" at ")
-                        .append(a.getAppointmentTime() != null ? a.getAppointmentTime().toString().substring(0, 5)
-                                : "TBD")
-                        .append(" [Status: ").append(a.getAppointmentStatus()).append("]")
-                        .append(" [Ref: ").append(a.getTransactionId() != null ? a.getTransactionId() : a.getId())
-                        .append("]\n");
+                        .append(a.getAppointmentTime() != null ? a.getAppointmentTime().toString().substring(0, 5) : "TBD")
+                        .append(" [Status: ").append(a.getAppointmentStatus()).append("]\n");
             }
             sb.append("\n");
         }
 
-        // 5. User Background & Patterns
-        sb.append("USER APPOINTMENT PATTERNS & HABITS:\n");
-        if (pattern.isHasHistory()) {
-            sb.append("- Historical Patterns: ").append(pattern.getPatternSummary()).append("\n");
-            sb.append(
-                    "- When booking is requested, subtly prioritize slots that match their preferred days and times.\n\n");
-        } else {
-            sb.append("- User has no previous appointment records. Welcome them warmly.\n\n");
-        }
-
-        // 6. Memory of Previous Conversation Turns
-        if (conversation.getSummary() != null && !conversation.getSummary().trim().isEmpty()) {
-            sb.append("PREVIOUS CONVERSATION CONTEXT:\n");
-            sb.append(conversation.getSummary()).append("\n\n");
-        }
-
-        // 7. Real-Time Verified Available Slots
+        // 5. Verified Real-Time Available Slots
         sb.append("VERIFIED REAL-TIME AVAILABLE SLOTS (Actual schedule, unbooked slots):\n");
         if (slots.isEmpty()) {
             sb.append("Currently, there are no open slots matching the filter criteria for the upcoming 14 days.\n");
@@ -557,24 +818,22 @@ public class AIAssistantService {
         String slotId;
         String actionType = "INFO_ONLY";
         Object actionPayload = null;
+        int currentStep = 1;
+        List<String> quickReplies = Collections.emptyList();
 
-        HumanResponse(String text, String slotId) {
-            this.text = text;
-            this.slotId = slotId;
-        }
-
-        HumanResponse(String text, String slotId, String actionType, Object actionPayload) {
+        HumanResponse(String text, String slotId, String actionType, Object actionPayload, int currentStep, List<String> quickReplies) {
             this.text = text;
             this.slotId = slotId;
             this.actionType = actionType;
             this.actionPayload = actionPayload;
+            this.currentStep = currentStep;
+            this.quickReplies = quickReplies != null ? quickReplies : Collections.emptyList();
         }
     }
 
     /**
-     * Highly natural, empathetic, and human-like conversational engine.
-     * Accurately parses user intents, gathers missing info step-by-step, and
-     * manages booking operations.
+     * Highly natural, empathetic, and human-like conversational engine implementing
+     * the strict 5-step sequential flow with zero organization interference.
      */
     private HumanResponse buildHumanFriendlyFallbackResponse(
             String userMessage,
@@ -583,64 +842,23 @@ public class AIAssistantService {
             Tenant selectedTenant,
             List<Appointment> userAppointments,
             String userEmail,
-            String targetService) {
+            String targetService,
+            ResolvedTarget target) {
 
         String msg = userMessage != null ? userMessage.trim().toLowerCase() : "";
-        String orgName = selectedTenant != null ? selectedTenant.getOrganizationName() : "OmniBook";
         OrganizationTerminology terms = selectedTenant != null
                 ? OrganizationTerminology.from(selectedTenant.getOrganizationType())
                 : OrganizationTerminology.from("General");
 
-        // 1. Time-of-day greetings
-        if (msg.contains("good morning")) {
-            return new HumanResponse("Good morning! ☀️ How can I help you with your "
-                    + terms.getAppointmentTerm().toLowerCase() + " today?", null);
+        String patientName = "";
+        if (userEmail != null && !userEmail.trim().isEmpty()) {
+            patientName = userRepository.findByEmail(userEmail.trim().toLowerCase())
+                    .map(User::getFullName)
+                    .orElse("");
         }
-        if (msg.contains("good afternoon")) {
-            return new HumanResponse("Good afternoon! 🌤️ How can I assist you with your "
-                    + terms.getAppointmentTerm().toLowerCase() + " today?", null);
-        }
-        if (msg.contains("good evening")) {
-            return new HumanResponse("Good evening! 🌙 How can I assist you with your schedule or bookings today?",
-                    null);
-        }
+        String salutation = (!patientName.isEmpty()) ? " " + patientName.split(" ")[0] : "";
 
-        // 2. Casual openings / Greetings
-        if (msg.matches("^(hi|hello|hey|heya|howdy|namaste|greetings|sup|what's up|whats up)[!.]?$")) {
-            if (selectedTenant != null) {
-                return new HumanResponse(
-                        "Hello! 👋 Welcome to " + orgName
-                                + ". I'm your AI Booking Assistant. Would you like to schedule a new "
-                                + terms.getAppointmentTerm().toLowerCase()
-                                + ", check upcoming bookings, or reschedule an existing one?",
-                        null);
-            } else {
-                return new HumanResponse(
-                        "Hello! 👋 Welcome to OmniBook. I can help you schedule, check, or reschedule appointments across our clinics, salons, colleges, and studios. Which organization or service would you like to book today?",
-                        null);
-            }
-        }
-
-        // 3. Are you there / Can you help me
-        if (msg.contains("are you there") || msg.contains("can you help") || msg.contains("need some help")
-                || msg.contains("need help")) {
-            return new HumanResponse(
-                    "Yes, I'm right here and ready to help! 😊 I can help you find available "
-                            + terms.getProviderTerm().toLowerCase()
-                            + "s, schedule a new " + terms.getAppointmentTerm().toLowerCase()
-                            + ", check your upcoming appointments, or cancel and reschedule. What would you like to do?",
-                    null);
-        }
-
-        // 4. How are you / Politeness
-        if (msg.contains("how are you") || msg.contains("how r u") || msg.contains("how are you doing")
-                || msg.contains("how's it going")) {
-            return new HumanResponse(
-                    "I'm doing great, thank you for asking! 😊 How can I help you today? Would you like to check available slots, book an appointment, or review your schedule?",
-                    null);
-        }
-
-        // 5. Check Upcoming Appointments
+        // Global Operation: Check Upcoming Appointments
         if (msg.contains("upcoming") || msg.contains("my appointment") || msg.contains("check status")
                 || msg.contains("my booking")) {
             LocalDate today = LocalDate.now();
@@ -651,25 +869,23 @@ public class AIAssistantService {
 
             if (upcoming.isEmpty()) {
                 return new HumanResponse(
-                        "You currently have no upcoming appointments scheduled with " + orgName
-                                + ". Would you like to schedule one now?",
-                        null);
+                        "You currently have no upcoming appointments scheduled. Would you like to schedule one now?",
+                        null, "INFO_ONLY", null, 1, List.of("Education / College", "Healthcare / Clinic", "Beauty / Salon & Spa", "Fitness & Gym"));
             } else {
                 StringBuilder sb = new StringBuilder("Here are your upcoming appointments:\n");
                 for (Appointment a : upcoming) {
                     sb.append("• #").append(a.getId()).append(": ").append(a.getServiceName())
                             .append(" on ").append(a.getAppointmentDate())
                             .append(" at ")
-                            .append(a.getAppointmentTime() != null ? a.getAppointmentTime().toString().substring(0, 5)
-                                    : "")
+                            .append(a.getAppointmentTime() != null ? a.getAppointmentTime().toString().substring(0, 5) : "")
                             .append(" (Status: ").append(a.getAppointmentStatus()).append(")\n");
                 }
                 sb.append("\nWould you like to reschedule or cancel any of these?");
-                return new HumanResponse(sb.toString(), null, "APPOINTMENT_LIST", upcoming);
+                return new HumanResponse(sb.toString(), null, "APPOINTMENT_LIST", upcoming, target.step, List.of("Cancel an appointment", "Start new booking"));
             }
         }
 
-        // 6. Cancellation Request
+        // Global Operation: Cancellation Request
         if (msg.contains("cancel")) {
             LocalDate today = LocalDate.now();
             List<Appointment> upcoming = userAppointments.stream()
@@ -687,14 +903,13 @@ public class AIAssistantService {
                         return new HumanResponse(
                                 "Your appointment #" + targetId
                                         + " has been successfully cancelled. We have updated your schedule and notified the provider.",
-                                null, "CANCEL_APPOINTMENT", Map.of("appointmentId", targetId, "status", "CANCELLED"));
+                                null, "CANCEL_APPOINTMENT", Map.of("appointmentId", targetId, "status", "CANCELLED"), target.step, List.of("Book new appointment"));
                     }
-                } catch (Exception ignored) {
-                }
+                } catch (Exception ignored) {}
             }
 
             if (upcoming.isEmpty()) {
-                return new HumanResponse("You don't have any active appointments to cancel right now.", null);
+                return new HumanResponse("You don't have any active appointments to cancel right now.", null, "INFO_ONLY", null, target.step, List.of("Book new appointment"));
             } else if (upcoming.size() == 1) {
                 Appointment a = upcoming.get(0);
                 if (msg.contains("yes") || msg.contains("confirm")) {
@@ -702,175 +917,452 @@ public class AIAssistantService {
                     return new HumanResponse(
                             "Your appointment #" + a.getId() + " for " + a.getServiceName() + " on "
                                     + a.getAppointmentDate() + " has been cancelled.",
-                            null, "CANCEL_APPOINTMENT", Map.of("appointmentId", a.getId(), "status", "CANCELLED"));
+                            null, "CANCEL_APPOINTMENT", Map.of("appointmentId", a.getId(), "status", "CANCELLED"), target.step, List.of("Book new appointment"));
                 } else {
                     return new HumanResponse(
                             "You have an upcoming appointment for " + a.getServiceName() + " on "
-                                    + a.getAppointmentDate()
-                                    + " at "
-                                    + (a.getAppointmentTime() != null
-                                            ? a.getAppointmentTime().toString().substring(0, 5)
-                                            : "")
+                                    + a.getAppointmentDate() + " at "
+                                    + (a.getAppointmentTime() != null ? a.getAppointmentTime().toString().substring(0, 5) : "")
                                     + ". Are you sure you would like to cancel it?",
-                            null);
+                            null, "INFO_ONLY", null, target.step, List.of("Yes, cancel it", "No, keep it"));
                 }
-            } else {
-                StringBuilder sb = new StringBuilder("You have " + upcoming.size()
-                        + " upcoming appointments. Which one would you like to cancel?\n");
-                for (Appointment a : upcoming) {
-                    sb.append("• Appointment #").append(a.getId()).append(" for ").append(a.getServiceName())
-                            .append(" on ").append(a.getAppointmentDate()).append("\n");
-                }
-                return new HumanResponse(sb.toString(), null);
             }
         }
 
-        // 7. Affirmation to book (e.g. "yes", "sure", "book it", "confirm", "yes,
-        // please book that slot")
-        if (msg.matches(
-                "^(yes|yeah|sure|ok|okay|sounds good|book it|book that|reserve it|confirm|great|perfect|yes please|select it)[!.]?$")
-                || msg.contains("book that slot") || msg.contains("book that") || msg.contains("book this")
-                || msg.contains("select that slot") || msg.contains("select this") || msg.contains("yes, please")
-                || msg.contains("yes please")) {
-            if (!slots.isEmpty()) {
-                AISlotDTO top = slots.get(0);
-                return new HumanResponse(
-                        "Perfect! I've selected the " + top.getDate() + " at " + top.getTime() + " slot with "
-                                + top.getProvider()
-                                + ". Click 'Select & Book Slot' below to add it directly to your appointment cart!",
-                        top.getId(), "SELECT_SLOT", Map.of("slotId", top.getId()));
-            } else {
-                return new HumanResponse(
-                        "I'd be happy to help you book! Which " + terms.getServiceTerm().toLowerCase()
-                                + " or " + terms.getProviderTerm().toLowerCase() + " are you looking for?",
-                        null);
-            }
+        // Reset / Start Over
+        if (msg.contains("start over") || msg.contains("restart") || msg.contains("reset") || msg.contains("book another")) {
+            return buildStep1Response(salutation);
         }
 
-        // 8. Booking Intent & Step-by-Step Questioning
-        boolean mentionsTiming = msg.contains("morning") || msg.contains("afternoon") || msg.contains("evening")
-                || msg.contains("monday") || msg.contains("tuesday") || msg.contains("wednesday")
-                || msg.contains("thursday") || msg.contains("friday") || msg.contains("saturday")
-                || msg.contains("sunday")
-                || msg.contains("today") || msg.contains("tomorrow") || msg.contains("next week")
-                || msg.contains(" am") || msg.contains(" pm") || msg.matches(".*\\b\\d{1,2}(?::\\d{2})?\\b.*");
-
-        boolean isBookingInquiry = msg.contains("book") || msg.contains("need") || msg.contains("want")
-                || msg.contains("schedule") || msg.contains("appointment") || msg.contains("haircut")
-                || msg.contains("styling") || msg.contains("session") || msg.contains("advising")
-                || msg.contains("exam");
-
-        // STEP: User stated organization or service, but has NOT provided timing:
-        if (isBookingInquiry && !mentionsTiming) {
-            String servDisplay = "appointment";
-            if (msg.contains("haircut") || msg.contains("hair") || msg.contains("styling")) {
-                servDisplay = "haircut and styling";
-            } else if (targetService != null && !targetService.isEmpty()) {
-                servDisplay = targetService.toLowerCase();
-            } else {
-                servDisplay = terms.getServiceTerm().toLowerCase();
-            }
-            return new HumanResponse(
-                    "Great! " + orgName + " offers " + servDisplay
-                            + ". What day and time do you prefer—morning, afternoon, or evening?",
-                    null);
+        // STEP 1: Select Organization Type (Category)
+        if (target.step == 1) {
+            return buildStep1Response(salutation);
         }
 
-        // 9. Timing preference provided: Filter matching slots!
-        if (mentionsTiming && !slots.isEmpty()) {
-            AISlotDTO matchedSlot = findMatchingSlot(slots, msg);
-            if (matchedSlot != null) {
-                return new HumanResponse(
-                        orgName + " has an opening on " + matchedSlot.getDate() + " at " + matchedSlot.getTime()
-                                + " for " + matchedSlot.getTitle() + " with " + matchedSlot.getProvider()
-                                + " (" + matchedSlot.getPrice() + "). Would you like to select this time?",
-                        matchedSlot.getId(), "SELECT_SLOT", Map.of("slotId", matchedSlot.getId()));
-            }
+        // STEP 2: Select Organization or Location
+        if (target.step == 2) {
+            return buildStep2Response(target, salutation);
         }
 
-        // 10. Default Slot Suggestion
-        if (slots.isEmpty()) {
-            return new HumanResponse(
-                    "I checked our live schedule for " + orgName
-                            + ", but there are no open slots matching your criteria for the next 14 days. Would you like to select a different date or staff member?",
-                    null);
+        // STEP 3: Select Service
+        if (target.step == 3 && selectedTenant != null) {
+            return buildStep3Response(target, selectedTenant, terms);
         }
 
-        AISlotDTO selectedSlot = slots.get(0);
-        StringBuilder response = new StringBuilder();
-        response.append(orgName).append(" has an opening on ")
-                .append(selectedSlot.getDate()).append(" at ").append(selectedSlot.getTime())
-                .append(" for ").append(selectedSlot.getTitle())
-                .append(" with ").append(selectedSlot.getProvider())
-                .append(" (").append(selectedSlot.getPrice()).append(").");
-
-        if (selectedSlot.getMatchReason() != null && !selectedSlot.getMatchReason().isEmpty()) {
-            response.append(" ").append(selectedSlot.getMatchReason());
+        // STEP 4: Choose Date
+        if (target.step == 4 && selectedTenant != null) {
+            return buildStep4Response(target, selectedTenant, terms);
         }
-        response.append(" Would you like to select this time?");
 
-        return new HumanResponse(response.toString(), selectedSlot.getId(), "SELECT_SLOT",
-                Map.of("slotId", selectedSlot.getId()));
+        // STEP 5: Date Check, Time Selection & Proceed to Payment
+        if (target.step == 5 && selectedTenant != null) {
+            return buildStep5Response(target, selectedTenant, terms, slots, userMessage);
+        }
+
+        // Default Fallback to Step 1
+        return buildStep1Response(salutation);
     }
 
-    private AISlotDTO findMatchingSlot(List<AISlotDTO> slots, String message) {
-        String lower = message.toLowerCase();
+    private HumanResponse buildStep1Response(String salutation) {
+        String text = "Hello" + salutation + "! 👋 Welcome to OmniBook AI Booking Assistant.\n\n"
+                + "Please choose your **Organization Type** to get started:\n\n"
+                + "1. 🎓 **Education / College** (Academic Advising, Faculty Consultation)\n"
+                + "2. 🏥 **Healthcare / Clinic** (Doctors, Specialists, Medical Checkup)\n"
+                + "3. 💇 **Beauty / Salon & Spa** (Haircut, Styling, Spa)\n"
+                + "4. 🏋️ **Fitness & Gym** (Personal Training, Workouts)\n\n"
+                + "Which organization type would you like to book with?";
+        List<String> quickReplies = List.of(
+                "Education / College",
+                "Healthcare / Clinic",
+                "Beauty / Salon & Spa",
+                "Fitness & Gym"
+        );
+        return new HumanResponse(text, null, "INFO_ONLY", null, 1, quickReplies);
+    }
+
+    private HumanResponse buildStep2Response(ResolvedTarget target, String salutation) {
+        String cat = target.category != null ? target.category : "Organization";
+        String catLabel = getCategoryLabel(cat);
+
+        List<Tenant> activeTenants = tenantRepository.findByStatus("ACTIVE").stream()
+                .filter(t -> matchOrgType(t.getOrganizationType(), cat))
+                .collect(Collectors.toList());
+
+        if (target.location != null && !target.location.trim().isEmpty()) {
+            List<Tenant> locFiltered = activeTenants.stream()
+                    .filter(t -> t.getAddress() != null && t.getAddress().toLowerCase().contains(target.location.toLowerCase()))
+                    .collect(Collectors.toList());
+            if (!locFiltered.isEmpty()) {
+                activeTenants = locFiltered;
+            }
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("You selected **").append(catLabel).append("**.\n\n");
+        if (activeTenants.isEmpty()) {
+            sb.append("Currently, there are no active organizations registered under this category. Would you like to check another category?");
+            return new HumanResponse(sb.toString(), null, "INFO_ONLY", null, 1, 
+                    List.of("Education / College", "Healthcare / Clinic", "Beauty / Salon & Spa", "Fitness & Gym"));
+        }
+
+        sb.append("Please select an organization or tell me your preferred location:\n\n");
+        List<String> orgQuickReplies = new ArrayList<>();
+        for (Tenant t : activeTenants) {
+            boolean hasAi = isAiEnabled(t);
+            sb.append("• **").append(t.getOrganizationName()).append("**");
+            if (t.getAddress() != null && !t.getAddress().trim().isEmpty()) {
+                sb.append(" — ").append(t.getAddress());
+            }
+            if (hasAi) {
+                sb.append(" *(Smart AI Booking Available)*");
+            } else {
+                sb.append(" *(Classic Calendar)*");
+            }
+            sb.append("\n");
+            orgQuickReplies.add(t.getOrganizationName());
+        }
+
+        sb.append("\nWhich organization would you like to book with?");
+        return new HumanResponse(sb.toString(), null, "INFO_ONLY", null, 2, orgQuickReplies);
+    }
+
+    private HumanResponse buildStep3Response(ResolvedTarget target, Tenant selectedTenant, OrganizationTerminology terms) {
+        String orgName = selectedTenant.getOrganizationName();
+        boolean hasAi = isAiEnabled(selectedTenant);
+        String tier = selectedTenant.getSubscriptionTier() != null ? selectedTenant.getSubscriptionTier() : "Starter";
+
+        if (!hasAi) {
+            String text = "**" + orgName + "** is currently on the **" + tier + " Plan** (Classic Calendar scheduling only).\n\n"
+                    + "Please switch to the **Classic Calendar** tab to view available slots and book your appointment with " + orgName 
+                    + ", or choose another organization that supports Smart AI Booking.";
+            return new HumanResponse(text, null, "PLAN_RESTRICTION", null, 3, 
+                    List.of("Switch to Classic Calendar", "Choose another organization", "Start Over"));
+        }
+
+        List<ProviderService> services = providerServiceRepository.findByTenantId(selectedTenant.getId()).stream()
+                .filter(s -> Boolean.TRUE.equals(s.getIsActive()))
+                .collect(Collectors.toList());
+
+        if (services.isEmpty()) {
+            String text = "**" + orgName + "** currently has no active services listed in the system. Would you like to choose another organization?";
+            return new HumanResponse(text, null, "INFO_ONLY", null, 2, List.of("Choose another organization", "Start Over"));
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Welcome to **").append(orgName).append("**! Please choose a service:\n\n");
+        List<String> serviceReplies = new ArrayList<>();
+        for (ProviderService s : services) {
+            sb.append("• **").append(s.getServiceName()).append("**");
+            if (s.getFee() != null) {
+                sb.append(" (रू ").append(String.format("%,d", s.getFee().longValue())).append(")");
+            }
+            if (s.getDurationMinutes() != null) {
+                sb.append(" — ").append(s.getDurationMinutes()).append(" mins");
+            }
+            sb.append("\n");
+            serviceReplies.add(s.getServiceName());
+        }
+        sb.append("\nWhich service would you like to schedule?");
+        return new HumanResponse(sb.toString(), null, "INFO_ONLY", null, 3, serviceReplies);
+    }
+
+    private HumanResponse buildStep4Response(ResolvedTarget target, Tenant selectedTenant, OrganizationTerminology terms) {
+        String orgName = selectedTenant.getOrganizationName();
+        String serviceName = target.service != null ? target.service : "Appointment";
+
+        Long providerId = target.provider != null ? target.provider.getId() : null;
+        List<LocalDate> availableDates = slotAvailabilityService.getAvailableDatesForService(selectedTenant.getId(), providerId, serviceName);
+
+        if (availableDates.isEmpty()) {
+            String text = "I checked the live schedule for **" + serviceName + "** at **" + orgName + "**, but there are no open operating days available for the upcoming 14 days.\n\n"
+                    + "Would you like to select a different service or check another organization?";
+            return new HumanResponse(text, null, "INFO_ONLY", null, 3, 
+                    List.of("Select another service", "Choose another organization", "Start Over"));
+        }
+
+        DateTimeFormatter dateDisplayFmt = DateTimeFormatter.ofPattern("EEE, MMM d");
+        ZoneId ZONE_KATHMANDU = ZoneId.of("Asia/Kathmandu");
+        LocalDate today = LocalDate.now(ZONE_KATHMANDU);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("You have selected **").append(serviceName).append("** at **").append(orgName).append("**! 🎓\n\n");
+        sb.append("Please choose your preferred appointment date (or enter any upcoming date like Sep 13, Sep 14, Sep 15):\n\n");
+
+        List<String> dateReplies = new ArrayList<>();
+        for (int i = 0; i < Math.min(7, availableDates.size()); i++) {
+            LocalDate d = availableDates.get(i);
+            String label = d.format(dateDisplayFmt);
+            if (d.isEqual(today)) {
+                label = "Today (" + label + ")";
+            } else if (d.isEqual(today.plusDays(1))) {
+                label = "Tomorrow (" + label + ")";
+            }
+            sb.append("• 📅 **").append(label).append("**\n");
+            dateReplies.add(d.isEqual(today) ? "Today (" + d.format(DateTimeFormatter.ofPattern("MMM d")) + ")" :
+                    (d.isEqual(today.plusDays(1)) ? "Tomorrow (" + d.format(DateTimeFormatter.ofPattern("MMM d")) + ")" : d.format(dateDisplayFmt)));
+        }
+
+        sb.append("\nWhich date works best for you?");
+        return new HumanResponse(sb.toString(), null, "INFO_ONLY", null, 4, dateReplies);
+    }
+
+    private HumanResponse buildStep5Response(ResolvedTarget target, Tenant selectedTenant, OrganizationTerminology terms, List<AISlotDTO> slots, String userMessage) {
+        String orgName = selectedTenant.getOrganizationName();
+        String serviceName = target.service != null ? target.service : "Appointment";
+        Long providerId = target.provider != null ? target.provider.getId() : null;
+
+        // 1. Check Date Availability
+        if (target.date == null) {
+            return buildStep4Response(target, selectedTenant, terms);
+        }
+
+        List<LocalDate> availableDates = slotAvailabilityService.getAvailableDatesForService(selectedTenant.getId(), providerId, serviceName);
+        boolean isDateAvailable = availableDates.contains(target.date);
+
+        if (!isDateAvailable) {
+            DateTimeFormatter dateFmt = DateTimeFormatter.ofPattern("EEEE, MMM d, yyyy");
+            StringBuilder sb = new StringBuilder();
+            sb.append("I checked the schedule for **").append(orgName).append("** on **").append(target.date.format(dateFmt)).append("**.\n\n");
+            sb.append("⚠️ The clinic / ").append(terms.getProviderTerm().toLowerCase()).append(" is **not available on this date** (it is a non-working day or closed).\n\n");
+            sb.append("Available upcoming dates are:\n");
+
+            DateTimeFormatter chipFmt = DateTimeFormatter.ofPattern("EEE, MMM d");
+            List<String> altDateReplies = new ArrayList<>();
+            for (int i = 0; i < Math.min(6, availableDates.size()); i++) {
+                LocalDate d = availableDates.get(i);
+                sb.append("• 📅 **").append(d.format(chipFmt)).append("**\n");
+                altDateReplies.add(d.format(chipFmt));
+            }
+            sb.append("\nPlease choose one of the available dates above:");
+            return new HumanResponse(sb.toString(), null, "INFO_ONLY", null, 4, altDateReplies);
+        }
+
+        // 2. If user hasn't chosen a time or is asking for available times:
+        AISlotDTO chosenSlot = findMatchingSlotForTime(slots, target.time, userMessage);
+
+        String lower = userMessage != null ? userMessage.toLowerCase() : "";
+        if (chosenSlot == null && !slots.isEmpty() && (lower.contains("proceed") || lower.contains("confirm") || lower.contains("book it") || lower.contains("select & book") || lower.contains("book appointment"))) {
+            chosenSlot = slots.get(0);
+        }
+
+        if (chosenSlot == null) {
+            if (slots.isEmpty()) {
+                String text = "All time slots for **" + serviceName + "** at **" + orgName + "** on **"
+                        + target.date.format(DateTimeFormatter.ofPattern("EEE, MMM d")) + "** are currently booked or passed.\n\n"
+                        + "Please choose another date:";
+                DateTimeFormatter chipFmt = DateTimeFormatter.ofPattern("EEE, MMM d");
+                List<String> dateReplies = availableDates.stream()
+                        .filter(d -> !d.equals(target.date))
+                        .limit(5)
+                        .map(d -> d.format(chipFmt))
+                        .collect(Collectors.toList());
+                return new HumanResponse(text, null, "INFO_ONLY", null, 4, dateReplies);
+            }
+
+            StringBuilder sb = new StringBuilder();
+            String dateLabel = target.date.format(DateTimeFormatter.ofPattern("EEEE, MMMM d, yyyy"));
+            sb.append("Great news! **").append(orgName).append("** is **available on ").append(dateLabel).append("**! 📅\n\n");
+            sb.append("Here are the available time slots for **").append(serviceName).append("** on this date:\n\n");
+
+            List<String> timeReplies = new ArrayList<>();
+            for (int i = 0; i < Math.min(10, slots.size()); i++) {
+                AISlotDTO s = slots.get(i);
+                sb.append("• **").append(s.getTime()).append("** — ").append(s.getProviderTitle())
+                        .append(" [").append(s.getPrice()).append("]\n");
+                timeReplies.add(s.getTime());
+            }
+
+            sb.append("\nPlease enter or select your preferred time:");
+            timeReplies.add("Change date");
+            return new HumanResponse(sb.toString(), null, "INFO_ONLY", null, 5, timeReplies);
+        }
+
+        // 3. Time slot matched and verified! Proceed to payment!
+        String text = "🎉 **Slot Confirmed!**\n\n"
+                + "• **Service**: " + chosenSlot.getTitle() + "\n"
+                + "• **" + terms.getProviderTerm() + "**: " + chosenSlot.getProviderTitle() + "\n"
+                + "• **Organization**: " + orgName + "\n"
+                + "• **Date**: " + chosenSlot.getDate() + "\n"
+                + "• **Time**: " + chosenSlot.getTime() + "\n"
+                + "• **Fee**: " + chosenSlot.getPrice() + "\n\n"
+                + "Click **'Proceed to Booking & Payment'** below to confirm your details and complete payment via **eSewa** or **Stripe**!";
+
+        Map<String, Object> payload = Map.of(
+                "slotId", chosenSlot.getId(),
+                "date", chosenSlot.getRawDate(),
+                "time", chosenSlot.getRawTime(),
+                "price", chosenSlot.getPrice(),
+                "service", chosenSlot.getTitle(),
+                "provider", chosenSlot.getProvider()
+        );
+
+        return new HumanResponse(text, chosenSlot.getId(), "SELECT_SLOT", payload, 5, 
+                List.of("Proceed to Booking & Payment", "Change time", "Change date"));
+    }
+
+    private AISlotDTO findMatchingSlotForTime(List<AISlotDTO> slots, String targetTime, String rawMessage) {
+        if (slots == null || slots.isEmpty()) return null;
+
+        String lowerMsg = rawMessage != null ? rawMessage.toLowerCase() : "";
+
+        // Check if user specified "Slot X" or "#X"
+        Matcher slotNumMat = Pattern.compile("(?:slot\\s*#?|#)(\\d+)").matcher(lowerMsg);
+        if (slotNumMat.find()) {
+            String sId = slotNumMat.group(1);
+            for (AISlotDTO s : slots) {
+                if (s.getId().equals(sId)) return s;
+            }
+        }
+
+        // Check exact targetTime (HH:mm) against rawTime
+        if (targetTime != null) {
+            for (AISlotDTO s : slots) {
+                if (s.getRawTime() != null && s.getRawTime().startsWith(targetTime)) {
+                    return s;
+                }
+            }
+        }
+
+        // Check if rawMessage contains slot's display time (e.g. "9:30" or "09:30 am")
         for (AISlotDTO s : slots) {
-            String day = s.getDate().toLowerCase(); // e.g. "mon, sep 14"
-            String time = s.getTime().toLowerCase(); // e.g. "10:00 am"
-
-            // Check day match
-            boolean dayMatch = false;
-            if (lower.contains("mon") && day.contains("mon"))
-                dayMatch = true;
-            else if (lower.contains("tue") && day.contains("tue"))
-                dayMatch = true;
-            else if (lower.contains("wed") && day.contains("wed"))
-                dayMatch = true;
-            else if (lower.contains("thu") && day.contains("thu"))
-                dayMatch = true;
-            else if (lower.contains("fri") && day.contains("fri"))
-                dayMatch = true;
-            else if (lower.contains("sat") && day.contains("sat"))
-                dayMatch = true;
-            else if (lower.contains("sun") && day.contains("sun"))
-                dayMatch = true;
-            else if (lower.contains("tomorrow") || lower.contains("today") || lower.contains("next"))
-                dayMatch = true;
-
-            // Check time of day match
-            boolean timeMatch = false;
-            if (lower.contains("morning")
-                    && (time.contains("am") || time.startsWith("0") || time.startsWith("10") || time.startsWith("11")))
-                timeMatch = true;
-            else if (lower.contains("afternoon")
-                    && (time.contains("pm") && !time.startsWith("6") && !time.startsWith("7") && !time.startsWith("8")))
-                timeMatch = true;
-            else if (lower.contains("evening")
-                    && (time.startsWith("5:") || time.startsWith("6:") || time.startsWith("7:")))
-                timeMatch = true;
-
-            // Or specific hour match
-            if (lower.contains("10:00") && time.contains("10:00"))
-                timeMatch = true;
-            else if (lower.contains("10 am") && time.contains("10:00"))
-                timeMatch = true;
-            else if (lower.contains("11:00") && time.contains("11:00"))
-                timeMatch = true;
-            else if (lower.contains("2:00") && time.contains("2:00"))
-                timeMatch = true;
-
-            if (dayMatch && timeMatch) {
+            if (s.getTime() != null && lowerMsg.contains(s.getTime().toLowerCase())) {
+                return s;
+            }
+            if (s.getRawTime() != null && lowerMsg.contains(s.getRawTime().substring(0, 5))) {
                 return s;
             }
         }
-        // Fallback to first slot matching day or time
-        for (AISlotDTO s : slots) {
-            if (lower.contains("morning") && s.getTime().contains("am"))
-                return s;
-            if (lower.contains("afternoon") && s.getTime().contains("pm"))
-                return s;
+
+        return null;
+    }
+
+    public static LocalDate parseUserDate(String text, LocalDate today) {
+        if (text == null || text.trim().isEmpty()) return null;
+        String lower = text.trim().toLowerCase();
+
+        if (lower.matches(".*\\b(today|tonight|right now|this morning|this afternoon|this evening)\\b.*")) {
+            return today;
         }
-        return slots.get(0);
+        if (lower.matches(".*\\b(tomorrow|tmrw)\\b.*")) {
+            return today.plusDays(1);
+        }
+        if (lower.contains("day after tomorrow")) {
+            return today.plusDays(2);
+        }
+
+        // Match ISO date YYYY-MM-DD
+        Matcher isoMat = Pattern.compile("\\b(\\d{4})-(\\d{1,2})-(\\d{1,2})\\b").matcher(lower);
+        if (isoMat.find()) {
+            try {
+                return LocalDate.of(Integer.parseInt(isoMat.group(1)), Integer.parseInt(isoMat.group(2)), Integer.parseInt(isoMat.group(3)));
+            } catch (Exception ignored) {}
+        }
+
+        // Match Month Day (e.g. Sep 13, Sep 14, Sep 15, September 14, Sept 15, 14 Sep, 15 Sept, 14th Sep)
+        Pattern monthDayPat = Pattern.compile("\\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\.?\\s*(\\d{1,2})(?:st|nd|rd|th)?\\b");
+        Matcher m1 = monthDayPat.matcher(lower);
+        if (m1.find()) {
+            String mStr = m1.group(1);
+            int day = Integer.parseInt(m1.group(2));
+            int month = parseMonth(mStr);
+            if (month > 0) {
+                int year = today.getYear();
+                LocalDate d = LocalDate.of(year, month, day);
+                if (d.isBefore(today)) {
+                    d = d.plusYears(1);
+                }
+                return d;
+            }
+        }
+
+        // Match Day Month (e.g. 14 Sep, 15 September, 14th of September)
+        Pattern dayMonthPat = Pattern.compile("\\b(\\d{1,2})(?:st|nd|rd|th)?\\s*(?:of\\s+)?(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\b");
+        Matcher m2 = dayMonthPat.matcher(lower);
+        if (m2.find()) {
+            int day = Integer.parseInt(m2.group(1));
+            String mStr = m2.group(2);
+            int month = parseMonth(mStr);
+            if (month > 0) {
+                int year = today.getYear();
+                LocalDate d = LocalDate.of(year, month, day);
+                if (d.isBefore(today)) {
+                    d = d.plusYears(1);
+                }
+                return d;
+            }
+        }
+
+        // Match Day of Week: (this/next) monday, tuesday, wednesday, thursday, friday, saturday, sunday
+        Pattern dowPat = Pattern.compile("\\b(this\\s+|next\\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\\b");
+        Matcher m3 = dowPat.matcher(lower);
+        if (m3.find()) {
+            String dowStr = m3.group(2);
+            DayOfWeek dow = parseDayOfWeek(dowStr);
+            if (dow != null) {
+                for (int i = 0; i <= 7; i++) {
+                    LocalDate candidate = today.plusDays(i);
+                    if (candidate.getDayOfWeek() == dow) {
+                        return candidate;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static int parseMonth(String mStr) {
+        if (mStr.startsWith("jan")) return 1;
+        if (mStr.startsWith("feb")) return 2;
+        if (mStr.startsWith("mar")) return 3;
+        if (mStr.startsWith("apr")) return 4;
+        if (mStr.startsWith("may")) return 5;
+        if (mStr.startsWith("jun")) return 6;
+        if (mStr.startsWith("jul")) return 7;
+        if (mStr.startsWith("aug")) return 8;
+        if (mStr.startsWith("sep")) return 9;
+        if (mStr.startsWith("oct")) return 10;
+        if (mStr.startsWith("nov")) return 11;
+        if (mStr.startsWith("dec")) return 12;
+        return 0;
+    }
+
+    private static DayOfWeek parseDayOfWeek(String dowStr) {
+        if (dowStr.startsWith("mon")) return DayOfWeek.MONDAY;
+        if (dowStr.startsWith("tue")) return DayOfWeek.TUESDAY;
+        if (dowStr.startsWith("wed")) return DayOfWeek.WEDNESDAY;
+        if (dowStr.startsWith("thu")) return DayOfWeek.THURSDAY;
+        if (dowStr.startsWith("fri")) return DayOfWeek.FRIDAY;
+        if (dowStr.startsWith("sat")) return DayOfWeek.SATURDAY;
+        if (dowStr.startsWith("sun")) return DayOfWeek.SUNDAY;
+        return null;
+    }
+
+    public static String parseUserTime(String text) {
+        if (text == null || text.trim().isEmpty()) return null;
+        String lower = text.trim().toLowerCase();
+
+        // 1. Matches "10:30 AM", "9:00 AM", "09:00am", "2:30 pm", "14:00"
+        Matcher timeWithPeriod = Pattern.compile("\\b(\\d{1,2}):(\\d{2})\\s*(am|pm)?\\b").matcher(lower);
+        if (timeWithPeriod.find()) {
+            int hour = Integer.parseInt(timeWithPeriod.group(1));
+            int min = Integer.parseInt(timeWithPeriod.group(2));
+            String period = timeWithPeriod.group(3);
+            if ("pm".equalsIgnoreCase(period) && hour < 12) hour += 12;
+            if ("am".equalsIgnoreCase(period) && hour == 12) hour = 0;
+            return String.format("%02d:%02d", hour, min);
+        }
+
+        // 2. Matches "10 am", "9 am", "2 pm", "3pm"
+        Matcher hourOnly = Pattern.compile("\\b(\\d{1,2})\\s*(am|pm)\\b").matcher(lower);
+        if (hourOnly.find()) {
+            int hour = Integer.parseInt(hourOnly.group(1));
+            String period = hourOnly.group(2);
+            if ("pm".equalsIgnoreCase(period) && hour < 12) hour += 12;
+            if ("am".equalsIgnoreCase(period) && hour == 12) hour = 0;
+            return String.format("%02d:00", hour);
+        }
+
+        return null;
     }
 }

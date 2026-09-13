@@ -19,10 +19,12 @@ public class AdminDashboardStatsDTO {
     private int inConsultPatients;
     private double esewaSettled;
     private double stripeConnect;
+    private double cashSettled;
 
     // Dual Ledger
     private double esewaWeeklyVolume;
     private double stripeWeeklyVolume;
+    private double cashWeeklyVolume;
 
     // Arrays
     private List<LivePatientFlowDTO> livePatientFlow;

@@ -79,7 +79,17 @@ public class GeminiClientService {
             ResponseEntity<Map> response = restTemplate.postForEntity(url, entity, Map.class);
             return extractTextFromGeminiResponse(response.getBody());
         } catch (Exception e) {
-            log.error("Gemini 3.5 Flash-Lite API request failed: {}", e.getMessage());
+            log.error("Gemini model {} API request failed: {}", GEMINI_MODEL, e.getMessage());
+            if (!"gemini-1.5-flash".equals(GEMINI_MODEL)) {
+                try {
+                    String fallbackUrl = String.format(GEMINI_API_URL_TEMPLATE, "gemini-1.5-flash", apiKey);
+                    log.info("Attempting Gemini model fallback to gemini-1.5-flash");
+                    ResponseEntity<Map> fallbackResp = restTemplate.postForEntity(fallbackUrl, entity, Map.class);
+                    return extractTextFromGeminiResponse(fallbackResp.getBody());
+                } catch (Exception ex) {
+                    log.warn("Gemini model fallback to gemini-1.5-flash failed: {}. Falling back to intelligent local engine.", ex.getMessage());
+                }
+            }
             return Optional.empty();
         }
     }

@@ -24,4 +24,6 @@ public interface AIChatMessageRepository extends JpaRepository<AIChatMessage, Lo
     List<AIChatMessage> findUnsummarizedMessagesBefore(@Param("conv") AIConversation conversation, @Param("maxId") Long maxId);
 
     long countByConversation(AIConversation conversation);
+
+    void deleteByConversation(AIConversation conversation);
 }

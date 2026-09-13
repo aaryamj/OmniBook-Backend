@@ -44,6 +44,7 @@ public class ProviderController {
     private final com.backend.service.AuditLogService auditLogService;
     private final com.backend.service.AdminService adminService;
     private final com.backend.service.AppointmentLifecycleService appointmentLifecycleService;
+    private final com.backend.service.DailySettlementService dailySettlementService;
 
     @GetMapping("/profile")
     public ResponseEntity<?> getProfile() {
@@ -654,8 +655,10 @@ public class ProviderController {
         }
     }
 
-    @PutMapping("/appointments/{id}/decline")
-    public ResponseEntity<?> declineAppointment(@PathVariable Long id) {
+    @PutMapping({"/appointments/{id}/decline", "/appointments/{id}/reject"})
+    public ResponseEntity<?> declineAppointment(
+            @PathVariable Long id,
+            @RequestBody(required = false) Map<String, String> requestBody) {
         try {
             UserDetails userDetails = (UserDetails) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
             User user = userRepository.findByEmail(userDetails.getUsername())
@@ -675,46 +678,16 @@ public class ProviderController {
                 return ResponseEntity.status(403).body(response);
             }
 
-            appointment.setAppointmentStatus("CANCELLED");
-            appointment.setCancelledAt(java.time.LocalDateTime.now());
-            appointment.setCancelledByName(user.getFullName() != null && !user.getFullName().isEmpty() ? user.getFullName() : user.getEmail());
-            appointment.setCancelledByRole(user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole());
-            appointment.setCancelledByUserId(user.getId());
-            appointmentRepository.save(appointment);
-
-            // Record lifecycle audit event
-            try {
-                String actorRole = user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole();
-                appointmentLifecycleService.recordLifecycleEvent(
-                        appointment.getId(),
-                        appointment.getTenantId(),
-                        "CANCELLED",
-                        user.getId(),
-                        appointment.getCancelledByName(),
-                        actorRole,
-                        "SCHEDULED",
-                        "CANCELLED",
-                        "Appointment declined and cancelled by " + actorRole + " (" + appointment.getCancelledByName() + ")",
-                        null
-                );
-            } catch (Exception ignored) {}
+            String reason = requestBody != null ? requestBody.get("reason") : null;
+            Map<String, Object> result = appointmentLifecycleService.rejectAppointmentByProvider(id, user.getEmail(), reason);
 
             try {
                 String actorRole = user.getTenantRole() != null ? user.getTenantRole().getRoleName() : user.getRole();
-                auditLogService.logAction(user, "Appointment #" + appointment.getId() + " cancelled by " + actorRole + " (" + appointment.getCancelledByName() + ")", "SYSTEM");
+                String actorName = user.getFullName() != null && !user.getFullName().isEmpty() ? user.getFullName() : user.getEmail();
+                auditLogService.logAction(user, "Appointment #" + appointment.getId() + " rejected by " + actorRole + " (" + actorName + ") with 100% refund policy", "SYSTEM");
             } catch (Exception ignored) {}
 
-            // Dispatch cancellation notifications
-            try {
-                notificationService.notifyAppointmentCancelled(appointment);
-            } catch (Exception notifEx) {
-                System.err.println("Failed to send cancellation notification: " + notifEx.getMessage());
-            }
-
-            Map<String, Object> response = new HashMap<>();
-            response.put("success", true);
-            response.put("message", "Appointment cancelled successfully");
-            return ResponseEntity.ok(response);
+            return ResponseEntity.ok(result);
         } catch (Exception e) {
             Map<String, Object> response = new HashMap<>();
             response.put("success", false);
@@ -1129,4 +1102,37 @@ public class ProviderController {
         }
     }
 
+    // ==========================================
+    // DAILY SETTLEMENTS (PROVIDER PORTAL)
+    // ==========================================
+
+    @GetMapping("/settlements")
+    public ResponseEntity<?> getProviderSettlements(java.security.Principal principal) {
+        try {
+            User provider = userRepository.findByEmail(principal.getName())
+                    .orElseThrow(() -> new RuntimeException("Provider not found: " + principal.getName()));
+            if (provider.getTenant() == null) {
+                return ResponseEntity.badRequest().body(Map.of("success", false, "message", "Provider has no tenant associated"));
+            }
+            return ResponseEntity.ok(dailySettlementService.getProviderOverview(provider.getId(), provider.getTenant().getId()));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/settlements/{date}")
+    public ResponseEntity<?> getProviderSettlementDetail(
+            @PathVariable @org.springframework.format.annotation.DateTimeFormat(iso = org.springframework.format.annotation.DateTimeFormat.ISO.DATE) java.time.LocalDate date,
+            java.security.Principal principal) {
+        try {
+            User provider = userRepository.findByEmail(principal.getName())
+                    .orElseThrow(() -> new RuntimeException("Provider not found: " + principal.getName()));
+            if (provider.getTenant() == null) {
+                return ResponseEntity.badRequest().body(Map.of("success", false, "message", "Provider has no tenant associated"));
+            }
+            return ResponseEntity.ok(dailySettlementService.getProviderDailySettlementDetail(provider.getId(), provider.getTenant().getId(), date));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("success", false, "message", e.getMessage()));
+        }
+    }
 }

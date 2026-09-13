@@ -19,23 +19,35 @@ public class ProviderScheduleController {
 
     @GetMapping("/admin/providers/{providerId}/schedule")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<ProviderScheduleSettingsDTO> getSchedule(Principal principal, @PathVariable Long providerId) {
-        return ResponseEntity.ok(providerScheduleService.getScheduleSettings(principal.getName(), providerId));
+    public ResponseEntity<?> getSchedule(Principal principal, @PathVariable Long providerId) {
+        try {
+            return ResponseEntity.ok(providerScheduleService.getScheduleSettings(principal.getName(), providerId));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("message", e.getMessage()));
+        }
     }
 
     @GetMapping("/provider/schedule/me")
     @PreAuthorize("hasAnyRole('SERVICE_PROVIDER', 'PROVIDER')")
-    public ResponseEntity<ProviderScheduleSettingsDTO> getMySchedule(Principal principal) {
-        return ResponseEntity.ok(providerScheduleService.getMyScheduleSettings(principal.getName()));
+    public ResponseEntity<?> getMySchedule(Principal principal) {
+        try {
+            return ResponseEntity.ok(providerScheduleService.getMyScheduleSettings(principal.getName()));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("message", e.getMessage()));
+        }
     }
 
     @PutMapping("/admin/providers/{providerId}/schedule")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<ProviderScheduleSettingsDTO> updateSchedule(
+    public ResponseEntity<?> updateSchedule(
             Principal principal,
             @PathVariable Long providerId,
             @RequestBody ProviderScheduleSettingsDTO request) {
-        return ResponseEntity.ok(providerScheduleService.updateScheduleSettings(principal.getName(), providerId, request));
+        try {
+            return ResponseEntity.ok(providerScheduleService.updateScheduleSettings(principal.getName(), providerId, request));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("message", e.getMessage()));
+        }
     }
 
     @PutMapping("/provider/schedule/me")

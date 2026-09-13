@@ -60,4 +60,15 @@ public class AIBookingController {
 
         return ResponseEntity.ok(result);
     }
+
+    @DeleteMapping("/conversations/{conversationId}")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<?> clearConversation(@PathVariable String conversationId) {
+        Optional<AIConversation> convOpt = conversationRepository.findByConversationId(conversationId);
+        if (convOpt.isPresent()) {
+            chatMessageRepository.deleteByConversation(convOpt.get());
+            conversationRepository.delete(convOpt.get());
+        }
+        return ResponseEntity.ok(Map.of("success", true, "message", "Conversation cleared successfully"));
+    }
 }

@@ -15,12 +15,16 @@ public class AdminController {
 
     private final AdminService adminService;
     private final PublicBookingController publicBookingController;
+    private final com.backend.service.DailySettlementService dailySettlementService;
+    private final com.backend.repository.UserRepository userRepository;
 
     @GetMapping("/dashboard")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<?> getDashboardStats(Principal principal) {
+    public ResponseEntity<?> getDashboardStats(
+            @RequestParam(required = false, defaultValue = "All Time") String timeFilter,
+            Principal principal) {
         try {
-            return ResponseEntity.ok(adminService.getDashboardStats(principal.getName()));
+            return ResponseEntity.ok(adminService.getDashboardStats(principal.getName(), timeFilter));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(java.util.Map.of("success", false, "message", e.getMessage()));
         }
@@ -127,6 +131,29 @@ public class AdminController {
         }
     }
 
+    @PutMapping("/appointments/{id}/payment")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> recordAppointmentPayment(
+            @PathVariable Long id,
+            @RequestBody java.util.Map<String, Object> body,
+            Principal principal) {
+        try {
+            String paymentMethod = body.containsKey("paymentMethod") && body.get("paymentMethod") != null 
+                    ? body.get("paymentMethod").toString() : "CASH";
+            String paymentStatus = body.containsKey("paymentStatus") && body.get("paymentStatus") != null 
+                    ? body.get("paymentStatus").toString() : "SUCCESS";
+            Double amount = null;
+            if (body.containsKey("amount") && body.get("amount") != null) {
+                amount = Double.valueOf(body.get("amount").toString());
+            }
+
+            adminService.recordAppointmentPayment(id, paymentMethod, paymentStatus, amount, principal.getName());
+            return ResponseEntity.ok(java.util.Map.of("success", true, "message", "Payment recorded successfully"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
     @DeleteMapping("/appointments/{id}")
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<?> cancelAppointment(@PathVariable Long id, Principal principal) {
@@ -216,6 +243,54 @@ public class AdminController {
     public ResponseEntity<?> globalSearch(@RequestParam(name = "q", defaultValue = "") String query, Principal principal) {
         try {
             return ResponseEntity.ok(adminService.globalSearch(principal.getName(), query));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
+    // ==========================================
+    // DAILY SETTLEMENT HUB (ORG ADMIN)
+    // ==========================================
+
+    @GetMapping("/settlements")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> getTenantSettlements(
+            @RequestParam(required = false) @org.springframework.format.annotation.DateTimeFormat(iso = org.springframework.format.annotation.DateTimeFormat.ISO.DATE) java.time.LocalDate startDate,
+            @RequestParam(required = false) @org.springframework.format.annotation.DateTimeFormat(iso = org.springframework.format.annotation.DateTimeFormat.ISO.DATE) java.time.LocalDate endDate,
+            @RequestParam(required = false) String status,
+            Principal principal) {
+        try {
+            com.backend.model.User admin = userRepository.findByEmail(principal.getName())
+                    .orElseThrow(() -> new RuntimeException("Admin not found"));
+            return ResponseEntity.ok(dailySettlementService.getAdminOverview(admin.getTenant().getId(), startDate, endDate, status));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/settlements/{date}")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> getTenantSettlementDetail(
+            @PathVariable @org.springframework.format.annotation.DateTimeFormat(iso = org.springframework.format.annotation.DateTimeFormat.ISO.DATE) java.time.LocalDate date,
+            Principal principal) {
+        try {
+            com.backend.model.User admin = userRepository.findByEmail(principal.getName())
+                    .orElseThrow(() -> new RuntimeException("Admin not found"));
+            return ResponseEntity.ok(dailySettlementService.getDailySettlementDetail(admin.getTenant().getId(), date));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(java.util.Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/settlements/{date}/finalize")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<?> finalizeSettlement(
+            @PathVariable @org.springframework.format.annotation.DateTimeFormat(iso = org.springframework.format.annotation.DateTimeFormat.ISO.DATE) java.time.LocalDate date,
+            Principal principal) {
+        try {
+            com.backend.model.User admin = userRepository.findByEmail(principal.getName())
+                    .orElseThrow(() -> new RuntimeException("Admin not found"));
+            return ResponseEntity.ok(dailySettlementService.finalizeDailySettlement(admin.getTenant().getId(), date, principal.getName()));
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(java.util.Map.of("success", false, "message", e.getMessage()));
         }

@@ -688,6 +688,7 @@ public class SuperadminService {
         // 6. SuperAdmin Navigation shortcuts
         java.util.List<com.backend.dto.GlobalSearchResultDTO> superNav = java.util.List.of(
                 com.backend.dto.GlobalSearchResultDTO.builder().id("nav-tenants").category("Navigation").title("Tenant Management").subtitle("Onboard and govern healthcare clinics & colleges").status("Module").link("/superadmin/tenants").icon("apartment").build(),
+                com.backend.dto.GlobalSearchResultDTO.builder().id("nav-clients").category("Navigation").title("Client Management").subtitle("Manage, inspect, and govern registered clients & patients").status("Module").link("/superadmin/clients").icon("groups").build(),
                 com.backend.dto.GlobalSearchResultDTO.builder().id("nav-kpi").category("Navigation").title("Platform KPIs & Metrics").subtitle("System telemetry, uptime, and database performance").status("Module").link("/superadmin/system-kpi").icon("monitoring").build(),
                 com.backend.dto.GlobalSearchResultDTO.builder().id("nav-support").category("Navigation").title("Support Desk & Tickets").subtitle("Handle customer queries, alerts, and SLA").status("Module").link("/superadmin/support").icon("support_agent").build(),
                 com.backend.dto.GlobalSearchResultDTO.builder().id("nav-permissions").category("Navigation").title("Roles & RBAC Permissions").subtitle("Manage custom organizational roles and access control").status("Module").link("/superadmin/permissions").icon("security").build(),
@@ -704,5 +705,275 @@ public class SuperadminService {
         }
 
         return results;
+    }
+
+    // ==========================================
+    // CLIENT MANAGEMENT
+    // ==========================================
+
+    @Transactional(readOnly = true)
+    public java.util.List<com.backend.dto.SuperadminClientDTO> getAllClients(String timeFilter) {
+        java.util.List<User> users = userRepository.findAll().stream()
+                .filter(u -> u.getRole() != null && (
+                        u.getRole().equalsIgnoreCase("user") ||
+                        u.getRole().equalsIgnoreCase("patient") ||
+                        u.getRole().equalsIgnoreCase("client") ||
+                        (!u.getRole().equalsIgnoreCase("admin") &&
+                         !u.getRole().equalsIgnoreCase("super_admin") &&
+                         !u.getRole().equalsIgnoreCase("provider") &&
+                         !u.getRole().equalsIgnoreCase("service_provider"))
+                ))
+                .collect(java.util.stream.Collectors.toList());
+
+        LocalDateTime cutoff = null;
+        if (timeFilter != null && !timeFilter.isBlank() && !"All Time".equalsIgnoreCase(timeFilter)) {
+            LocalDateTime now = LocalDateTime.now();
+            if ("Last 7 Days".equalsIgnoreCase(timeFilter)) {
+                cutoff = now.minusDays(7);
+            } else if ("Last 30 Days".equalsIgnoreCase(timeFilter)) {
+                cutoff = now.minusDays(30);
+            } else if ("This Quarter".equalsIgnoreCase(timeFilter)) {
+                cutoff = now.minusMonths(3);
+            } else if ("This Year".equalsIgnoreCase(timeFilter)) {
+                cutoff = now.withDayOfYear(1).withHour(0).withMinute(0).withSecond(0);
+            }
+        }
+
+        final LocalDateTime finalCutoff = cutoff;
+        if (finalCutoff != null) {
+            users = users.stream()
+                    .filter(u -> u.getCreatedAt() != null && !u.getCreatedAt().isBefore(finalCutoff))
+                    .collect(java.util.stream.Collectors.toList());
+        }
+
+        java.util.List<com.backend.model.Appointment> allAppts = appointmentRepository.findAll();
+
+        java.util.List<com.backend.dto.SuperadminClientDTO> result = new java.util.ArrayList<>();
+        for (User u : users) {
+            java.util.List<com.backend.model.Appointment> clientAppts = allAppts.stream()
+                    .filter(a -> (a.getBookedByUserId() != null && a.getBookedByUserId().equals(u.getId())) ||
+                                 (a.getPatientEmail() != null && a.getPatientEmail().equalsIgnoreCase(u.getEmail())) ||
+                                 (u.getPhone() != null && u.getPhone().equals(a.getPatientPhone())))
+                    .collect(java.util.stream.Collectors.toList());
+
+            int totalAppts = clientAppts.size();
+            double totalSpend = clientAppts.stream()
+                    .filter(a -> "SUCCESS".equalsIgnoreCase(a.getPaymentStatus()) || "PAID".equalsIgnoreCase(a.getPaymentStatus()))
+                    .mapToDouble(a -> a.getPrice() != null ? a.getPrice() : 0.0)
+                    .sum();
+
+            Integer age = null;
+            if (u.getDateOfBirth() != null) {
+                age = java.time.Period.between(u.getDateOfBirth(), java.time.LocalDate.now()).getYears();
+            }
+
+            result.add(com.backend.dto.SuperadminClientDTO.builder()
+                    .id(u.getId())
+                    .fullName(u.getFullName())
+                    .email(u.getEmail())
+                    .phone(u.getPhone())
+                    .role(u.getRole())
+                    .enabled(u.isEnabled())
+                    .status(u.isEnabled() ? "ACTIVE" : "SUSPENDED")
+                    .profilePicture(u.getProfilePicture())
+                    .dateOfBirth(u.getDateOfBirth())
+                    .age(age)
+                    .bloodGroup(u.getBloodGroup())
+                    .allergies(u.getAllergies())
+                    .weight(u.getWeight())
+                    .heartRate(u.getHeartRate())
+                    .authProvider(u.getAuthProvider() != null ? u.getAuthProvider().name() : "LOCAL")
+                    .googleConnected(u.isGoogleConnected())
+                    .facebookConnected(u.isFacebookConnected())
+                    .createdAt(u.getCreatedAt())
+                    .lastLoginAt(u.getLastLoginAt())
+                    .lastLoginLocation(u.getLastLoginLocation())
+                    .totalAppointments(totalAppts)
+                    .totalSpend(totalSpend)
+                    .build());
+        }
+
+        result.sort((c1, c2) -> {
+            if (c1.getCreatedAt() == null && c2.getCreatedAt() == null) return 0;
+            if (c1.getCreatedAt() == null) return 1;
+            if (c2.getCreatedAt() == null) return -1;
+            return c2.getCreatedAt().compareTo(c1.getCreatedAt());
+        });
+
+        return result;
+    }
+
+    @Transactional(readOnly = true)
+    public com.backend.dto.SuperadminClientKPIDTO getClientKPIs(String timeFilter) {
+        java.util.List<com.backend.dto.SuperadminClientDTO> all = getAllClients(null);
+        long totalClients = all.size();
+        long activeClients = all.stream().filter(com.backend.dto.SuperadminClientDTO::isEnabled).count();
+        long suspendedClients = totalClients - activeClients;
+
+        LocalDateTime sevenDaysAgo = LocalDateTime.now().minusDays(7);
+        long newThisWeek = all.stream()
+                .filter(c -> c.getCreatedAt() != null && !c.getCreatedAt().isBefore(sevenDaysAgo))
+                .count();
+
+        long totalBookings = appointmentRepository.count();
+
+        return com.backend.dto.SuperadminClientKPIDTO.builder()
+                .totalClients(totalClients)
+                .activeClients(activeClients)
+                .suspendedClients(suspendedClients)
+                .totalBookings(totalBookings)
+                .newClientsThisWeek(newThisWeek)
+                .build();
+    }
+
+    @Transactional(readOnly = true)
+    public com.backend.dto.SuperadminClientDTO getClientDetails(Long clientId) {
+        User u = userRepository.findById(clientId)
+                .orElseThrow(() -> new RuntimeException("Client not found with ID: " + clientId));
+
+        java.util.List<com.backend.model.Appointment> clientAppts = appointmentRepository.findAll().stream()
+                .filter(a -> (a.getBookedByUserId() != null && a.getBookedByUserId().equals(u.getId())) ||
+                             (a.getPatientEmail() != null && a.getPatientEmail().equalsIgnoreCase(u.getEmail())) ||
+                             (u.getPhone() != null && u.getPhone().equals(a.getPatientPhone())))
+                .collect(java.util.stream.Collectors.toList());
+
+        int totalAppts = clientAppts.size();
+        double totalSpend = clientAppts.stream()
+                .filter(a -> "SUCCESS".equalsIgnoreCase(a.getPaymentStatus()) || "PAID".equalsIgnoreCase(a.getPaymentStatus()))
+                .mapToDouble(a -> a.getPrice() != null ? a.getPrice() : 0.0)
+                .sum();
+
+        Integer age = null;
+        if (u.getDateOfBirth() != null) {
+            age = java.time.Period.between(u.getDateOfBirth(), java.time.LocalDate.now()).getYears();
+        }
+
+        return com.backend.dto.SuperadminClientDTO.builder()
+                .id(u.getId())
+                .fullName(u.getFullName())
+                .email(u.getEmail())
+                .phone(u.getPhone())
+                .role(u.getRole())
+                .enabled(u.isEnabled())
+                .status(u.isEnabled() ? "ACTIVE" : "SUSPENDED")
+                .profilePicture(u.getProfilePicture())
+                .dateOfBirth(u.getDateOfBirth())
+                .age(age)
+                .bloodGroup(u.getBloodGroup())
+                .allergies(u.getAllergies())
+                .weight(u.getWeight())
+                .heartRate(u.getHeartRate())
+                .authProvider(u.getAuthProvider() != null ? u.getAuthProvider().name() : "LOCAL")
+                .googleConnected(u.isGoogleConnected())
+                .facebookConnected(u.isFacebookConnected())
+                .createdAt(u.getCreatedAt())
+                .lastLoginAt(u.getLastLoginAt())
+                .lastLoginLocation(u.getLastLoginLocation())
+                .totalAppointments(totalAppts)
+                .totalSpend(totalSpend)
+                .build();
+    }
+
+    @Transactional(readOnly = true)
+    public java.util.List<com.backend.dto.SuperadminClientActivityDTO> getClientActivities(Long clientId) {
+        User client = userRepository.findById(clientId)
+                .orElseThrow(() -> new RuntimeException("Client not found with ID: " + clientId));
+
+        java.util.List<com.backend.model.Appointment> appts = appointmentRepository.findAll().stream()
+                .filter(a -> (a.getBookedByUserId() != null && a.getBookedByUserId().equals(clientId)) ||
+                             (a.getPatientEmail() != null && a.getPatientEmail().equalsIgnoreCase(client.getEmail())) ||
+                             (client.getPhone() != null && client.getPhone().equals(a.getPatientPhone())))
+                .sorted((a1, a2) -> {
+                    if (a1.getAppointmentDate() == null && a2.getAppointmentDate() == null) return 0;
+                    if (a1.getAppointmentDate() == null) return 1;
+                    if (a2.getAppointmentDate() == null) return -1;
+                    int cmp = a2.getAppointmentDate().compareTo(a1.getAppointmentDate());
+                    if (cmp != 0) return cmp;
+                    if (a1.getAppointmentTime() != null && a2.getAppointmentTime() != null) {
+                        return a2.getAppointmentTime().compareTo(a1.getAppointmentTime());
+                    }
+                    return 0;
+                })
+                .collect(java.util.stream.Collectors.toList());
+
+        java.util.List<com.backend.dto.SuperadminClientActivityDTO> list = new java.util.ArrayList<>();
+        for (com.backend.model.Appointment a : appts) {
+            Tenant tenant = a.getTenantId() != null ? tenantRepository.findById(a.getTenantId()).orElse(null) : null;
+            User provider = a.getProviderId() != null ? userRepository.findById(a.getProviderId()).orElse(null) : null;
+
+            String pm = a.getPaymentMethod() != null ? a.getPaymentMethod().toUpperCase() : "N/A";
+            String ps = a.getPaymentStatus() != null ? a.getPaymentStatus().toUpperCase() : "UNPAID";
+            String billingStatus = "Pending";
+            if ("PAID".equals(ps) || "SUCCESS".equals(ps)) {
+                if (pm.contains("ESEWA")) {
+                    billingStatus = "[eSewa Verified]";
+                } else if (pm.contains("STRIPE")) {
+                    billingStatus = "[Stripe Verified]";
+                } else if (pm.contains("CASH")) {
+                    billingStatus = "[Cash Verified]";
+                } else {
+                    billingStatus = "[Verified]";
+                }
+            }
+
+            list.add(com.backend.dto.SuperadminClientActivityDTO.builder()
+                    .appointmentId(a.getId())
+                    .tenantId(a.getTenantId())
+                    .organizationName(tenant != null ? tenant.getOrganizationName() : "Facility #" + a.getTenantId())
+                    .organizationType(tenant != null && tenant.getOrganizationType() != null ? tenant.getOrganizationType() : "Clinic")
+                    .providerId(a.getProviderId())
+                    .providerName(provider != null ? provider.getFullName() : (a.getBookedByName() != null ? a.getBookedByName() : "Assigned Staff"))
+                    .providerSpecialty(provider != null ? provider.getSpecialization() : "General")
+                    .providerProfilePicture(provider != null ? provider.getProfilePicture() : null)
+                    .serviceName(a.getServiceName() != null ? a.getServiceName() : "General Service")
+                    .appointmentDate(a.getAppointmentDate())
+                    .appointmentTime(a.getAppointmentTime())
+                    .appointmentType(a.getAppointmentType() != null ? a.getAppointmentType() : "IN_PERSON")
+                    .appointmentStatus(a.getAppointmentStatus() != null ? a.getAppointmentStatus() : "SCHEDULED")
+                    .price(a.getPrice())
+                    .paymentMethod(a.getPaymentMethod())
+                    .paymentStatus(a.getPaymentStatus())
+                    .billingStatus(billingStatus)
+                    .transactionId(a.getTransactionId())
+                    .bookedAt(a.getBookedAt())
+                    .approvedAt(a.getApprovedAt())
+                    .checkedInAt(a.getCheckedInAt())
+                    .completedAt(a.getCompletedAt())
+                    .cancelledAt(a.getCancelledAt())
+                    .rejectedAt(a.getRejectedAt())
+                    .cancellationReason(a.getCancellationReason())
+                    .rejectionReason(a.getRejectionReason())
+                    .treatmentSummary(a.getTreatmentSummary())
+                    .build());
+        }
+        return list;
+    }
+
+    @Transactional
+    public void suspendClient(Long clientId) {
+        User client = userRepository.findById(clientId)
+                .orElseThrow(() -> new RuntimeException("Client not found with ID: " + clientId));
+        client.setEnabled(false);
+        userRepository.save(client);
+
+        notificationService.createNotification(
+                "Client Account Suspended",
+                "Client " + client.getFullName() + " (" + client.getEmail() + ") has been suspended by Super Admin.",
+                "CLIENT_SUSPEND"
+        );
+    }
+
+    @Transactional
+    public void reactivateClient(Long clientId) {
+        User client = userRepository.findById(clientId)
+                .orElseThrow(() -> new RuntimeException("Client not found with ID: " + clientId));
+        client.setEnabled(true);
+        userRepository.save(client);
+
+        notificationService.createNotification(
+                "Client Account Reactivated",
+                "Client " + client.getFullName() + " (" + client.getEmail() + ") has been reactivated by Super Admin.",
+                "CLIENT_REACTIVATE"
+        );
     }
 }

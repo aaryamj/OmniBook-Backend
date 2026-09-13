@@ -114,7 +114,13 @@ public class SubscriptionPlanService {
     }
 
     public SubscriptionPlan getPlanEntityByName(String name) {
-        return subscriptionPlanRepository.findByNameIgnoreCase(name)
+        if (name == null || name.isBlank()) return null;
+        SubscriptionPlan plan = subscriptionPlanRepository.findByNameIgnoreCase(name.trim()).orElse(null);
+        if (plan != null) return plan;
+        String clean = name.trim().toLowerCase();
+        return subscriptionPlanRepository.findAll().stream()
+                .filter(p -> clean.contains(p.getName().toLowerCase()) || p.getName().toLowerCase().contains(clean))
+                .findFirst()
                 .orElse(null);
     }
 
@@ -131,6 +137,21 @@ public class SubscriptionPlanService {
         if (clean.contains("enterprise")) return 15000.0;
         if (clean.contains("pro")) return 5000.0;
         return 2000.0;
+    }
+
+    public Double getFallbackAnnualPriceForTier(String tier) {
+        if (tier == null || tier.isBlank()) return 20400.0;
+        String clean = tier.trim().toLowerCase();
+        SubscriptionPlan plan = subscriptionPlanRepository.findAll().stream()
+                .filter(p -> clean.contains(p.getName().toLowerCase()))
+                .findFirst()
+                .orElse(null);
+        if (plan != null && plan.getAnnualPrice() != null) {
+            return plan.getAnnualPrice();
+        }
+        if (clean.contains("enterprise")) return 153000.0;
+        if (clean.contains("pro")) return 51000.0;
+        return 20400.0;
     }
 
     @Transactional

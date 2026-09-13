@@ -571,9 +571,173 @@ public class AppointmentLifecycleService {
     }
 
     /**
+     * Rejects a booking request by the Service Provider.
+     * Enforces the OmniBook 100% Refund Policy:
+     * - Immediate 100% refund/void of any charged payment (Stripe / eSewa) with zero penalty.
+     * - Status transitions to REJECTED.
+     * - Excluded completely from Daily Settlements: Rs. 0.00 provider payout, 0.00 org revenue, 0.00 platform fee, 0.00 gateway fee.
+     * - Preserves booking and payment audit logs for transparency.
+     * - Dispatches multi-org dynamic notifications and customer emails.
+     */
+    @Transactional
+    public Map<String, Object> rejectAppointmentByProvider(Long appointmentId, String actorEmail, String rejectionReason) {
+        Appointment appointment = appointmentRepository.findById(appointmentId)
+                .orElseThrow(() -> new RuntimeException("Appointment not found: " + appointmentId));
+
+        User actor = userRepository.findByEmail(actorEmail)
+                .orElseThrow(() -> new RuntimeException("User not found: " + actorEmail));
+
+        String currentStatus = appointment.getAppointmentStatus() != null ? appointment.getAppointmentStatus().toUpperCase() : "";
+        if ("REJECTED".equals(currentStatus)) {
+            throw new IllegalStateException("Appointment has already been rejected.");
+        }
+        if ("COMPLETED".equals(currentStatus)) {
+            throw new IllegalStateException("Cannot reject an appointment that is already completed.");
+        }
+        if ("CANCELLED".equals(currentStatus)) {
+            throw new IllegalStateException("Cannot reject an appointment that is already cancelled.");
+        }
+
+        String actorRole = actor.getTenantRole() != null ? actor.getTenantRole().getRoleName() : (actor.getRole() != null ? actor.getRole() : "service_provider");
+        String actorName = actor.getFullName() != null && !actor.getFullName().isBlank() ? actor.getFullName() : actor.getEmail();
+
+        LocalDateTime now = LocalDateTime.now();
+        String finalReason = (rejectionReason != null && !rejectionReason.isBlank()) 
+                ? rejectionReason.trim() 
+                : "Service provider declined booking request";
+
+        // Determine if customer paid online before approval
+        String payStatus = appointment.getPaymentStatus() != null ? appointment.getPaymentStatus().toUpperCase() : "";
+        boolean hasPaid = "SUCCESS".equals(payStatus) || "PAID".equals(payStatus) || "IN ESCROW".equals(payStatus) || "SETTLED".equals(payStatus);
+
+        double refundAmount = 0.0;
+        String refundCurrency = "NPR";
+        String refundTxId = null;
+
+        if (hasPaid) {
+            // 100% full refund policy: 0% deduction
+            if ("STRIPE".equalsIgnoreCase(appointment.getPaymentMethod())) {
+                refundCurrency = "USD";
+                refundAmount = appointment.getChargedAmount() != null && appointment.getChargedAmount() > 0 
+                        ? appointment.getChargedAmount() 
+                        : (appointment.getPrice() != null ? appointment.getPrice() : 0.0);
+                try {
+                    String ref = appointment.getGatewayPaymentRef() != null ? appointment.getGatewayPaymentRef() : appointment.getTransactionId();
+                    refundTxId = paymentService.executeStripeRefund(ref, refundAmount);
+                } catch (Exception e) {
+                    log.error("Stripe refund failed when provider rejected appointment {}: {}", appointment.getId(), e.getMessage());
+                    refundTxId = "STRIPE-REF-SIM-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+                }
+            } else if ("ESEWA".equalsIgnoreCase(appointment.getPaymentMethod())) {
+                refundCurrency = "NPR";
+                refundAmount = appointment.getBasePriceNpr() != null && appointment.getBasePriceNpr() > 0 
+                        ? appointment.getBasePriceNpr() 
+                        : (appointment.getPrice() != null ? appointment.getPrice() : 0.0);
+                refundTxId = paymentService.executeEsewaRefund(appointment.getTransactionId(), refundAmount);
+            } else {
+                refundCurrency = "NPR";
+                refundAmount = appointment.getPrice() != null ? appointment.getPrice() : 0.0;
+                refundTxId = "CASH-VOID-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase();
+            }
+
+            appointment.setRefundEligibilityPercentage(100.0);
+            appointment.setRefundAmount(refundAmount);
+            appointment.setRefundCurrency(refundCurrency);
+            appointment.setRefundTransactionId(refundTxId);
+            appointment.setRefundStatus("REFUNDED");
+            appointment.setRefundedAt(now);
+            appointment.setPaymentStatus("REFUNDED");
+        } else {
+            appointment.setRefundEligibilityPercentage(100.0);
+            appointment.setRefundAmount(0.0);
+            appointment.setRefundCurrency("NPR");
+            appointment.setRefundStatus("NOT_CHARGED");
+            appointment.setPaymentStatus("VOIDED");
+        }
+
+        // Transition appointment status and record rejection audit
+        String oldStatus = appointment.getAppointmentStatus();
+        appointment.setAppointmentStatus("REJECTED");
+        appointment.setRejectedAt(now);
+        appointment.setRejectedByName(actorName);
+        appointment.setRejectedByRole(actorRole);
+        appointment.setRejectedByUserId(actor.getId());
+        appointment.setRejectionReason(finalReason);
+
+        // Daily Settlement Complete Exclusion: Zero out all settlement fields
+        appointment.setSettlementStatus("EXCLUDED");
+        appointment.setSettlementAmount(0.0);
+        appointment.setOrgSettlementAmount(0.0);
+        appointment.setRemainingOrgAmount(0.0);
+        appointment.setNetRetainedAmount(0.0);
+        appointment.setGatewayFeeAmount(0.0);
+        appointment.setDailySettlementId(null);
+        appointment.setSettlementBatchDate(null);
+
+        Appointment saved = appointmentRepository.save(appointment);
+
+        // Zero and exclude commission settlement record
+        try {
+            commissionService.adjustSettlementForNoShowOrRefund(saved.getId(), refundAmount, "REJECTED");
+        } catch (Exception commEx) {
+            log.warn("Failed adjusting commission ledger on rejection for appointment {}: {}", saved.getId(), commEx.getMessage());
+        }
+
+        // Record lifecycle audit event
+        try {
+            recordLifecycleEvent(
+                    saved.getId(),
+                    saved.getTenantId(),
+                    "REJECTED",
+                    actor.getId(),
+                    actorName,
+                    actorRole,
+                    oldStatus != null ? oldStatus : "PENDING_APPROVAL",
+                    "REJECTED",
+                    "Booking request rejected by " + actorRole + " (" + actorName + "). Reason: " + finalReason,
+                    Map.of(
+                            "rejectionReason", finalReason,
+                            "refundAmount", refundAmount,
+                            "refundCurrency", refundCurrency,
+                            "refundTransactionId", refundTxId != null ? refundTxId : "NONE",
+                            "settlementStatus", "EXCLUDED",
+                            "providerPayout", 0.0,
+                            "orgAdminPayout", 0.0
+                    )
+            );
+        } catch (Exception eventEx) {
+            log.warn("Failed recording lifecycle event on rejection: {}", eventEx.getMessage());
+        }
+
+        // Dispatch dynamic multi-org notifications and emails
+        try {
+            notificationService.notifyAppointmentRejectedByProvider(saved, finalReason, refundAmount, refundCurrency);
+        } catch (Exception notifEx) {
+            log.warn("Failed sending rejection notification: {}", notifEx.getMessage());
+        }
+
+        try {
+            emailService.sendAppointmentRejectedRefundEmail(saved, finalReason, refundAmount, refundCurrency);
+        } catch (Exception mailEx) {
+            log.warn("Failed sending rejection refund email: {}", mailEx.getMessage());
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("success", true);
+        result.put("message", "Appointment request declined and 100% refund processed successfully.");
+        result.put("status", "REJECTED");
+        result.put("appointmentId", saved.getId());
+        result.put("refundAmount", refundAmount);
+        result.put("refundCurrency", refundCurrency);
+        result.put("refundStatus", saved.getRefundStatus());
+        result.put("rejectionReason", finalReason);
+        return result;
+    }
+
+    /**
      * Get complete chronological lifecycle audit events for an appointment.
      * Automatically backfills and persists any missing lifecycle milestones (BOOKED, APPROVED/CONFIRMED,
-     * CHECKED_IN, COMPLETED, CANCELLED, NO_SHOW) from the Appointment entity's own audit timestamps.
+     * CHECKED_IN, COMPLETED, CANCELLED, NO_SHOW, REJECTED) from the Appointment entity's own audit timestamps.
      */
     @Transactional
     public List<AppointmentLifecycleEvent> getLifecycleEvents(Long appointmentId) {
@@ -589,6 +753,7 @@ public class AppointmentLifecycleService {
         boolean hasCompleted = events.stream().anyMatch(e -> "COMPLETED".equalsIgnoreCase(e.getEventType()));
         boolean hasCancelled = events.stream().anyMatch(e -> "CANCELLED".equalsIgnoreCase(e.getEventType()));
         boolean hasNoShow = events.stream().anyMatch(e -> "NO_SHOW".equalsIgnoreCase(e.getEventType()));
+        boolean hasRejected = events.stream().anyMatch(e -> "REJECTED".equalsIgnoreCase(e.getEventType()));
 
         List<AppointmentLifecycleEvent> toSave = new ArrayList<>();
 
@@ -672,6 +837,23 @@ public class AppointmentLifecycleService {
                     .toStatus("CANCELLED")
                     .reason(appointment.getCancellationReason() != null ? appointment.getCancellationReason() : "Appointment cancelled")
                     .createdAt(appointment.getCancelledAt())
+                    .build());
+        }
+
+        // 5b. REJECTED Milestone
+        if (!hasRejected && "REJECTED".equalsIgnoreCase(appointment.getAppointmentStatus())) {
+            LocalDateTime rejTime = appointment.getRejectedAt() != null ? appointment.getRejectedAt() : (appointment.getUpdatedAt() != null ? appointment.getUpdatedAt() : LocalDateTime.now());
+            toSave.add(AppointmentLifecycleEvent.builder()
+                    .appointmentId(appointment.getId())
+                    .tenantId(appointment.getTenantId())
+                    .eventType("REJECTED")
+                    .actorId(appointment.getRejectedByUserId())
+                    .actorName(appointment.getRejectedByName() != null ? appointment.getRejectedByName() : "Service Provider")
+                    .actorRole(appointment.getRejectedByRole() != null ? appointment.getRejectedByRole() : "PROVIDER")
+                    .fromStatus("PENDING_APPROVAL")
+                    .toStatus("REJECTED")
+                    .reason(appointment.getRejectionReason() != null ? appointment.getRejectionReason() : "Booking request rejected by provider (100% refund processed)")
+                    .createdAt(rejTime)
                     .build());
         }
 

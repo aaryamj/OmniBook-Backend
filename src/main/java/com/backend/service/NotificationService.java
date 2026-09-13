@@ -323,6 +323,49 @@ public class NotificationService {
     }
 
     @Transactional
+    public void notifyAppointmentRejectedByProvider(Appointment appointment, String rejectionReason, Double refundAmount, String refundCurrency) {
+        if (appointment == null) return;
+        DynamicTerms terms = getTermsForAppointment(appointment);
+        Long tenantId = appointment.getTenantId();
+        Long patientUserId = resolvePatientUserId(appointment);
+
+        String refundNote;
+        if (refundAmount != null && refundAmount > 0) {
+            String curr = (refundCurrency != null && !refundCurrency.isBlank()) ? refundCurrency : "NPR";
+            refundNote = " A 100% refund of " + curr + " " + String.format("%.2f", refundAmount) + " has been processed to your original payment method.";
+        } else {
+            refundNote = " No charge was captured for this request.";
+        }
+
+        String reasonNote = (rejectionReason != null && !rejectionReason.isBlank()) ? (" Reason: " + rejectionReason + ".") : "";
+        String providerName = appointment.getDoctorName() != null ? appointment.getDoctorName() : ("The " + terms.provider.toLowerCase());
+
+        if (patientUserId != null) {
+            notifyUser(patientUserId,
+                    terms.session + " Request Declined",
+                    providerName + " was unable to accept your " + terms.session.toLowerCase() + " request for " + appointment.getServiceName() + " on " + appointment.getAppointmentDate() + "." + reasonNote + refundNote,
+                    "REJECTED",
+                    "/my-appointments");
+        }
+
+        if (appointment.getProviderId() != null) {
+            notifyProvider(appointment.getProviderId(), tenantId,
+                    terms.session + " Request Declined",
+                    "You declined the " + terms.session.toLowerCase() + " request from " + terms.customer.toLowerCase() + " " + appointment.getPatientName() + " on " + appointment.getAppointmentDate() + ". The booking is marked REJECTED and excluded from daily settlements.",
+                    "REJECTED",
+                    "/provider-dashboard");
+        }
+
+        if (tenantId != null) {
+            notifyTenantAdmin(tenantId,
+                    terms.session + " Request Declined",
+                    terms.provider + " " + providerName + " declined " + terms.session.toLowerCase() + " #" + appointment.getId() + " for " + appointment.getPatientName() + " (" + terms.customer + ")." + reasonNote + " Excluded from daily settlements.",
+                    "REJECTED",
+                    "/admin/appointments?search=" + appointment.getId());
+        }
+    }
+
+    @Transactional
     public void notifyAppointmentNoShow(Appointment appointment) {
         if (appointment == null) return;
         DynamicTerms terms = getTermsForAppointment(appointment);

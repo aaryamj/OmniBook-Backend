@@ -280,7 +280,16 @@ public class CommissionService {
             commission.setProviderPayout(providerSettlement);
             commission.setOrgAdminPayout(orgAdminSettlement);
 
-            if (boundedRefund > 0 && netRetained > 0) {
+            if ("REJECTED".equalsIgnoreCase(finalStatus)) {
+                commission.setNetRetainedAmount(0.0);
+                commission.setCommissionAmount(0.0);
+                commission.setGatewayFeeAmount(0.0);
+                commission.setRemainingOrgAmount(0.0);
+                commission.setProviderPayout(0.0);
+                commission.setOrgAdminPayout(0.0);
+                commission.setPaymentStatus("REFUNDED");
+                commission.setSettlementStatus("EXCLUDED");
+            } else if (boundedRefund > 0 && netRetained > 0) {
                 commission.setPaymentStatus("PARTIALLY_REFUNDED");
                 commission.setSettlementStatus("ADJUSTED_REFUND");
             } else if (boundedRefund > 0 && netRetained == 0) {

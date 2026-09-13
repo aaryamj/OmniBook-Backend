@@ -403,6 +403,59 @@ public class EmailService {
         }
     }
 
+    public void sendAppointmentRejectedRefundEmail(Appointment appointment, String rejectionReason, double refundAmount, String refundCurrency) {
+        if (appointment.getPatientEmail() == null || appointment.getPatientEmail().isEmpty()) {
+            return;
+        }
+        try {
+            MimeMessage message = mailSender.createMimeMessage();
+            MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
+            helper.setTo(appointment.getPatientEmail());
+            helper.setSubject("Booking Request Declined - 100% Refund Processed: " + appointment.getServiceName());
+
+            String dateStr = appointment.getAppointmentDate() != null ? appointment.getAppointmentDate().format(DateTimeFormatter.ofPattern("EEEE, MMM dd, yyyy")) : "N/A";
+            String timeStr = appointment.getAppointmentTime() != null ? appointment.getAppointmentTime().format(DateTimeFormatter.ofPattern("hh:mm a")) : "N/A";
+            String providerName = appointment.getDoctorName() != null ? appointment.getDoctorName() : "Service Provider";
+            String curr = (refundCurrency != null && !refundCurrency.isBlank()) ? refundCurrency : "NPR";
+
+            String refundSection;
+            if (refundAmount > 0) {
+                refundSection = "<div style=\"background: #ecfdf5; border: 1px solid #a7f3d0; padding: 14px; border-radius: 8px; margin-top: 14px;\">" +
+                        "<p style=\"margin: 0; color: #065f46; font-weight: bold;\">✓ 100% Full Refund Issued</p>" +
+                        "<p style=\"margin: 4px 0 0 0; color: #047857; font-size: 13px;\">Amount: <strong>" + curr + " " + String.format("%.2f", refundAmount) + "</strong></p>" +
+                        "<p style=\"margin: 4px 0 0 0; color: #047857; font-size: 13px;\">Payment Method: " + (appointment.getPaymentMethod() != null ? appointment.getPaymentMethod() : "Online Gateway") + "</p>" +
+                        (appointment.getRefundTransactionId() != null ? ("<p style=\"margin: 4px 0 0 0; color: #047857; font-size: 12px;\">Refund Ref: " + appointment.getRefundTransactionId() + "</p>") : "") +
+                        "</div>";
+            } else {
+                refundSection = "<p style=\"color: #64748b; font-size: 13px; margin-top: 12px;\">Payment Status: No charge was captured for this booking.</p>";
+            }
+
+            String htmlContent = "<!DOCTYPE html><html><head><style>" +
+                "body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; padding: 20px; margin: 0; }" +
+                ".container { max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden; }" +
+                ".header { background: #fee2e2; padding: 20px; border-bottom: 1px solid #fecaca; text-align: center; }" +
+                ".header h3 { margin: 0; color: #991b1b; font-size: 20px; }" +
+                ".content { padding: 32px 24px; }" +
+                ".details { background: #f8fafc; padding: 20px; border-radius: 8px; margin-bottom: 24px; color: #334155; }" +
+                ".details p { margin: 8px 0; font-size: 14px; }" +
+                "</style></head><body><div class=\"container\">" +
+                "<div class=\"header\"><h3>Booking Request Declined</h3></div>" +
+                "<div class=\"content\"><div class=\"details\">" +
+                "<p><strong>Service:</strong> " + appointment.getServiceName() + "</p>" +
+                "<p><strong>Provider:</strong> " + providerName + "</p>" +
+                "<p><strong>Requested Schedule:</strong> " + dateStr + " at " + timeStr + "</p>" +
+                "<p><strong>Reason:</strong> " + ((rejectionReason != null && !rejectionReason.isBlank()) ? rejectionReason : "Provider unavailable during this slot") + "</p>" +
+                refundSection +
+                "</div><p style=\"color:#64748b;font-size:14px;\">We apologize for the inconvenience. You may book another slot or choose another provider anytime on OmniBook.</p></div></div></body></html>";
+
+            helper.setText(htmlContent, true);
+            mailSender.send(message);
+            log.info("Booking request rejection refund email sent to {}", appointment.getPatientEmail());
+        } catch (Exception e) {
+            log.error("Failed to send rejection refund email to {}", appointment.getPatientEmail(), e);
+        }
+    }
+
     public void sendAppointmentRescheduledEmail(Appointment appointment, LocalDate oldDate, LocalTime oldTime) {
         if (appointment.getPatientEmail() == null || appointment.getPatientEmail().isEmpty()) {
             return;

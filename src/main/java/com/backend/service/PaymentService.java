@@ -167,11 +167,20 @@ public class PaymentService {
                 appointmentTime = LocalTime.NOON; // ultimate fallback
             }
             
-            Double price = 1500.0;
-            try {
-                price = Double.parseDouble(priceStr);
-            } catch (Exception e) {
-                e.printStackTrace();
+            Double price = null;
+            if (request.getTotalAmount() != null && request.getTotalAmount() > 0 && request.getSelectedSlots() != null && !request.getSelectedSlots().isEmpty()) {
+                price = request.getTotalAmount() / request.getSelectedSlots().size();
+            } else if (priceStr != null && !priceStr.isBlank() && !"1500".equals(priceStr)) {
+                try {
+                    price = Double.parseDouble(priceStr);
+                } catch (Exception ignored) {}
+            }
+            if (price == null || price <= 0) {
+                try {
+                    price = Double.parseDouble(priceStr);
+                } catch (Exception e) {
+                    price = 500.0;
+                }
             }
 
             double slotBasePriceNpr = price;
@@ -424,6 +433,9 @@ public class PaymentService {
         if (!appointments.isEmpty()) {
             for (Appointment appointment : appointments) {
                 appointment.setPaymentStatus("SUCCESS");
+                if (appointment.getPaymentMethod() == null || appointment.getPaymentMethod().isBlank()) {
+                    appointment.setPaymentMethod("ESEWA");
+                }
                 appointmentRepository.save(appointment);
                 try {
                     commissionService.recordAppointmentCommission(appointment, "SUCCESS");
@@ -461,6 +473,9 @@ public class PaymentService {
                     String gatewayRef = session.getPaymentIntent() != null ? session.getPaymentIntent() : sessionId;
                     for (Appointment a : appointments) {
                         a.setPaymentStatus("SUCCESS");
+                        if (a.getPaymentMethod() == null || a.getPaymentMethod().isBlank()) {
+                            a.setPaymentMethod("STRIPE");
+                        }
                         a.setGatewayPaymentRef(gatewayRef);
                         appointmentRepository.save(a);
                         try {

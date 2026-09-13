@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.TextStyle;
 import java.util.*;
@@ -26,13 +27,15 @@ public class SlotAvailabilityService {
     private final ProviderProfileRepository providerProfileRepository;
     private final ProviderServiceRepository providerServiceRepository;
     private final ProviderScheduleRepository providerScheduleRepository;
+    private final TenantScheduleRepository tenantScheduleRepository;
     private final AppointmentRepository appointmentRepository;
 
+    private static final ZoneId ZONE_KATHMANDU = ZoneId.of("Asia/Kathmandu");
     private static final DateTimeFormatter DATE_DISPLAY_FORMAT = DateTimeFormatter.ofPattern("EEE, MMM d");
     private static final DateTimeFormatter TIME_DISPLAY_FORMAT = DateTimeFormatter.ofPattern("h:mm a");
 
     /**
-     * Finds strictly verified, available bookable slots over the next 14 days.
+     * Finds strictly verified, available bookable slots over the next 14 days or for a specific date.
      * Evaluates against the user's historical appointment patterns and ranks them.
      */
     public List<AISlotDTO> getVerifiedAvailableSlots(
@@ -40,13 +43,51 @@ public class SlotAvailabilityService {
             String targetClinicId,
             String targetProviderId,
             String targetService) {
+        return getVerifiedAvailableSlots(pattern, targetClinicId, targetProviderId, targetService, null, null);
+    }
+
+    public List<AISlotDTO> getVerifiedAvailableSlots(
+            PatientAppointmentPatternDTO pattern,
+            String targetClinicId,
+            String targetProviderId,
+            String targetService,
+            LocalDate filterDate) {
+        return getVerifiedAvailableSlots(pattern, targetClinicId, targetProviderId, targetService, null, filterDate);
+    }
+
+    public List<AISlotDTO> getVerifiedAvailableSlots(
+            PatientAppointmentPatternDTO pattern,
+            String targetClinicId,
+            String targetProviderId,
+            String targetService,
+            String targetOrgType,
+            LocalDate filterDate) {
 
         List<AISlotDTO> allAvailableSlots = new ArrayList<>();
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZONE_KATHMANDU);
+        LocalTime nowTime = LocalTime.now(ZONE_KATHMANDU);
 
-        // 1. Determine which clinics to inspect
+        if (filterDate != null && filterDate.isBefore(today)) {
+            return Collections.emptyList();
+        }
+
+        // Strict isolation: If neither targetClinicId nor targetOrgType is specified,
+        // do not return random slots to avoid confusing the user across organizations.
+        if ((targetClinicId == null || targetClinicId.trim().isEmpty())
+                && (targetOrgType == null || targetOrgType.trim().isEmpty())) {
+            return Collections.emptyList();
+        }
+
+        // 1. Determine which clinics to inspect (Strictly AI-enabled organizations)
         List<Tenant> clinics = tenantRepository.findAll().stream()
                 .filter(t -> !"SUSPENDED".equalsIgnoreCase(t.getStatus()) && !"INACTIVE".equalsIgnoreCase(t.getStatus()))
+                .filter(t -> {
+                    String tier = t.getSubscriptionTier() != null ? t.getSubscriptionTier() : "Starter";
+                    boolean isExpiredOrSuspended = "EXPIRED".equalsIgnoreCase(t.getSubscriptionStatus())
+                            || "SUSPENDED".equalsIgnoreCase(t.getSubscriptionStatus())
+                            || (t.getSubscriptionExpiryDate() != null && LocalDate.now().isAfter(t.getSubscriptionExpiryDate()));
+                    return !isExpiredOrSuspended && ("Professional".equalsIgnoreCase(tier) || "Enterprise".equalsIgnoreCase(tier));
+                })
                 .collect(Collectors.toList());
 
         if (targetClinicId != null && !targetClinicId.trim().isEmpty()) {
@@ -54,6 +95,24 @@ public class SlotAvailabilityService {
                 Long cId = Long.parseLong(targetClinicId.trim());
                 clinics = clinics.stream().filter(t -> t.getId().equals(cId)).collect(Collectors.toList());
             } catch (Exception ignored) {}
+        } else if (targetOrgType != null && !targetOrgType.trim().isEmpty()) {
+            String normType = targetOrgType.trim().toLowerCase();
+            clinics = clinics.stream().filter(t -> {
+                String tType = (t.getOrganizationType() != null ? t.getOrganizationType() : "").toLowerCase();
+                if (normType.contains("college") || normType.contains("acad") || normType.contains("educ") || normType.contains("school")) {
+                    return tType.contains("college") || tType.contains("acad") || tType.contains("educ") || tType.contains("school");
+                }
+                if (normType.contains("salon") || normType.contains("saloon") || normType.contains("spa") || normType.contains("beauty")) {
+                    return tType.contains("salon") || tType.contains("saloon") || tType.contains("spa") || tType.contains("beauty");
+                }
+                if (normType.contains("gym") || normType.contains("fitness")) {
+                    return tType.contains("gym") || tType.contains("fitness");
+                }
+                if (normType.contains("clinic") || normType.contains("hosp") || normType.contains("health") || normType.contains("medic")) {
+                    return tType.contains("clinic") || tType.contains("hosp") || tType.contains("health") || tType.contains("medic");
+                }
+                return tType.equalsIgnoreCase(normType);
+            }).collect(Collectors.toList());
         }
 
         // Count existing booked appointments for the upcoming 14-day window to prevent double-booking
@@ -104,10 +163,24 @@ public class SlotAvailabilityService {
                     if (matchingService.getMaxCapacity() != null && matchingService.getMaxCapacity() > 0) maxCapacity = matchingService.getMaxCapacity();
                 }
 
-                // Check upcoming 14 days
-                for (int dayOffset = 1; dayOffset <= 14; dayOffset++) {
+                // Check days to inspect: if filterDate is provided, check only that date; otherwise next 14 days starting from today (0)
+                int startOffset = 0;
+                int endOffset = 14;
+                if (filterDate != null) {
+                    long diff = java.time.temporal.ChronoUnit.DAYS.between(today, filterDate);
+                    startOffset = (int) diff;
+                    endOffset = (int) diff;
+                }
+
+                for (int dayOffset = startOffset; dayOffset <= endOffset; dayOffset++) {
                     LocalDate checkDate = today.plusDays(dayOffset);
                     String dayOfWeek = checkDate.getDayOfWeek().getDisplayName(TextStyle.FULL, Locale.ENGLISH);
+
+                    // Check clinic-level schedule constraint: if facility is closed on this day, no slots are available
+                    Optional<TenantSchedule> tenantScheduleOpt = tenantScheduleRepository.findByTenantIdAndDayOfWeek(clinic.getId(), dayOfWeek);
+                    if (tenantScheduleOpt.isPresent() && Boolean.FALSE.equals(tenantScheduleOpt.get().getIsActive())) {
+                        continue;
+                    }
 
                     Optional<ProviderSchedule> scheduleOpt = providerScheduleRepository.findByProviderAndDayOfWeek(provider, dayOfWeek);
                     if (scheduleOpt.isEmpty()) continue;
@@ -126,6 +199,12 @@ public class SlotAvailabilityService {
                     while (slotTime.plusMinutes(durationMinutes).isBefore(close) || slotTime.plusMinutes(durationMinutes).equals(close)) {
                         LocalTime slotEnd = slotTime.plusMinutes(durationMinutes);
 
+                        // If slot is for today, strictly filter out past times
+                        if (checkDate.isEqual(today) && !slotTime.isAfter(nowTime)) {
+                            slotTime = slotEnd;
+                            continue;
+                        }
+
                         // Check break time
                         boolean isInBreak = false;
                         if (breakStart != null && breakEnd != null) {
@@ -141,7 +220,7 @@ public class SlotAvailabilityService {
                         int availableSeats = Math.max(0, maxCapacity - currentBookings);
 
                         if (!isInBreak && !isAlreadyBooked) {
-                            String priceStr = "रू " + String.format("%,d", (long) fee);
+                            String priceStr = "\u0930\u0942 " + String.format("%,d", (long) fee);
                             String providerDisplay = com.backend.util.OrganizationTerminology.formatProviderDisplay(
                                     provider.getFullName(),
                                     profile != null ? profile.getPrimarySpecialty() : null,
@@ -180,10 +259,57 @@ public class SlotAvailabilityService {
         }
 
         // Rank and score the available slots against patient's appointment patterns
-        return rankSlotsByPattern(allAvailableSlots, pattern);
+        return rankSlotsByPattern(allAvailableSlots, pattern, filterDate);
     }
 
-    private List<AISlotDTO> rankSlotsByPattern(List<AISlotDTO> slots, PatientAppointmentPatternDTO pattern) {
+    public List<LocalDate> getAvailableDatesForService(Long tenantId, Long providerId, String serviceName) {
+        LocalDate today = LocalDate.now(ZONE_KATHMANDU);
+        LocalTime nowTime = LocalTime.now(ZONE_KATHMANDU);
+
+        if (tenantId == null) return Collections.emptyList();
+        Tenant clinic = tenantRepository.findById(tenantId).orElse(null);
+        if (clinic == null) return Collections.emptyList();
+
+        List<User> providers = userRepository.findByTenantIdAndRole(clinic.getId(), "service_provider");
+        if (providerId != null) {
+            providers = providers.stream().filter(u -> u.getId().equals(providerId)).collect(Collectors.toList());
+        }
+        if (providers.isEmpty()) return Collections.emptyList();
+
+        List<LocalDate> availableDates = new ArrayList<>();
+
+        for (int dayOffset = 0; dayOffset <= 14; dayOffset++) {
+            LocalDate checkDate = today.plusDays(dayOffset);
+            String dayOfWeek = checkDate.getDayOfWeek().getDisplayName(TextStyle.FULL, Locale.ENGLISH);
+
+            Optional<TenantSchedule> tenantScheduleOpt = tenantScheduleRepository.findByTenantIdAndDayOfWeek(clinic.getId(), dayOfWeek);
+            if (tenantScheduleOpt.isPresent() && Boolean.FALSE.equals(tenantScheduleOpt.get().getIsActive())) {
+                continue;
+            }
+
+            boolean anyProviderAvailable = false;
+            for (User provider : providers) {
+                Optional<ProviderSchedule> scheduleOpt = providerScheduleRepository.findByProviderAndDayOfWeek(provider, dayOfWeek);
+                if (scheduleOpt.isPresent() && Boolean.TRUE.equals(scheduleOpt.get().getIsActive())) {
+                    LocalTime open = scheduleOpt.get().getOpeningTime();
+                    LocalTime close = scheduleOpt.get().getClosingTime();
+                    if (open != null && close != null) {
+                        if (!checkDate.isEqual(today) || close.isAfter(nowTime)) {
+                            anyProviderAvailable = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (anyProviderAvailable) {
+                availableDates.add(checkDate);
+            }
+        }
+        return availableDates;
+    }
+
+    private List<AISlotDTO> rankSlotsByPattern(List<AISlotDTO> slots, PatientAppointmentPatternDTO pattern, LocalDate filterDate) {
         if (slots.isEmpty()) {
             return slots;
         }
@@ -194,74 +320,45 @@ public class SlotAvailabilityService {
         Long preferredProviderId = pattern != null ? pattern.getPreferredProviderId() : null;
 
         for (AISlotDTO slot : slots) {
-            int score = 0;
             StringBuilder matchReason = new StringBuilder();
 
             try {
                 LocalDate date = LocalDate.parse(slot.getRawDate());
                 LocalTime time = LocalTime.parse(slot.getRawTime());
 
-                // Day of week match
                 if (!preferredDays.isEmpty() && preferredDays.contains(date.getDayOfWeek())) {
-                    score += 40;
-                    if (preferredDays.get(0) == date.getDayOfWeek()) {
-                        score += 15;
-                        matchReason.append("Matches your most frequent visit day (").append(date.getDayOfWeek().name()).append("). ");
-                    }
+                    matchReason.append("Matches preferred day (").append(date.getDayOfWeek().name()).append("). ");
                 }
 
-                // Time of day match
                 int hour = time.getHour();
                 boolean matchesTimeOfDay = ("MORNING".equalsIgnoreCase(preferredTimeOfDay) && hour < 12) ||
                         ("AFTERNOON".equalsIgnoreCase(preferredTimeOfDay) && hour >= 12 && hour < 16) ||
                         ("EVENING".equalsIgnoreCase(preferredTimeOfDay) && hour >= 16);
 
                 if (matchesTimeOfDay) {
-                    score += 35;
-                    matchReason.append("Fits your typical ").append(preferredTimeOfDay.toLowerCase()).append(" preference. ");
+                    matchReason.append("Fits ").append(preferredTimeOfDay.toLowerCase()).append(" hours. ");
                 }
 
-                // Provider match
                 if (preferredProviderId != null && preferredProviderId.equals(slot.getProviderId())) {
-                    score += 30;
                     com.backend.util.OrganizationTerminology terms = com.backend.util.OrganizationTerminology.from(slot.getOrganizationType());
-                    matchReason.append("With your preferred ").append(terms.getProviderTerm().toLowerCase()).append(". ");
+                    matchReason.append("With preferred ").append(terms.getProviderTerm().toLowerCase()).append(". ");
                 }
-
-                // Early date bonus (prefer sooner within next 7 days)
-                long daysAway = java.time.temporal.ChronoUnit.DAYS.between(LocalDate.now(), date);
-                if (daysAway <= 3) {
-                    score += 10;
-                }
-
             } catch (Exception ignored) {}
 
             slot.setMatchReason(matchReason.toString().trim());
         }
 
-        // Sort by score descending (we'll re-index IDs so 1, 2, 3... represent top recommended slots)
-        slots.sort((a, b) -> {
-            int scoreA = calculateSlotScore(a, preferredDays, preferredTimeOfDay, preferredProviderId);
-            int scoreB = calculateSlotScore(b, preferredDays, preferredTimeOfDay, preferredProviderId);
-            return Integer.compare(scoreB, scoreA);
-        });
+        // Strictly sort chronologically by date and time so earlier dates appear first (No artificial day-of-week bias)
+        slots.sort(Comparator.comparing(AISlotDTO::getRawDate).thenComparing(AISlotDTO::getRawTime));
 
-        // Mark the top 1 as topMatch
-        if (!slots.isEmpty()) {
-            slots.get(0).setTopMatch(true);
-            if (slots.get(0).getMatchReason() == null || slots.get(0).getMatchReason().isEmpty()) {
-                String orgName = slots.get(0).getOrganizationName() != null ? slots.get(0).getOrganizationName() : "schedule";
-                slots.get(0).setMatchReason("Top recommended slot based on " + orgName + " availability.");
-            }
-        }
-
-        // Re-assign IDs 1 to N so prompt referencing [BOOK_SLOT_ID:1] matches exactly
+        // Re-assign IDs 1 to N so prompt referencing [BOOK_SLOT_ID:1] or "Slot X" matches chronological order
         for (int i = 0; i < slots.size(); i++) {
             slots.get(i).setId(String.valueOf(i + 1));
         }
 
-        // Return top 8 best candidate slots
-        return slots.stream().limit(8).collect(Collectors.toList());
+        // Return up to 30 slots if filtering by date, or 24 slots across dates
+        int limit = filterDate != null ? 30 : 24;
+        return slots.stream().limit(limit).collect(Collectors.toList());
     }
 
     private int calculateSlotScore(AISlotDTO slot, List<DayOfWeek> preferredDays, String preferredTimeOfDay, Long preferredProviderId) {

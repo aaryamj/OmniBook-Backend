@@ -234,6 +234,11 @@ public class UserController {
                 map.put("cancelledByRole", app.getCancelledByRole());
                 map.put("cancellationReason", app.getCancellationReason());
 
+                map.put("rejectedAt", app.getRejectedAt());
+                map.put("rejectedByName", app.getRejectedByName());
+                map.put("rejectedByRole", app.getRejectedByRole());
+                map.put("rejectionReason", app.getRejectionReason());
+
                 // Rescheduling fields
                 map.put("rescheduleCount", app.getRescheduleCount() != null ? app.getRescheduleCount() : 0);
                 map.put("originalAppointmentDate", app.getOriginalAppointmentDate());

@@ -33,5 +33,5 @@ build/
 .vscode/
 
 .env
-.env*
+.env.properties
 uploads/

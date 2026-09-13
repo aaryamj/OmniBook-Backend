@@ -26,6 +26,7 @@ public class SuperadminController {
     private final com.backend.service.SubscriptionPlanService subscriptionPlanService;
     private final com.backend.service.SubscriptionService subscriptionService;
     private final com.backend.service.CommissionService commissionService;
+    private final com.backend.service.DailySettlementService dailySettlementService;
 
     @PostMapping("/tenants")
     public ResponseEntity<String> onboardClinic(@RequestBody OnboardClinicRequest request) {
@@ -272,6 +273,16 @@ public class SuperadminController {
     }
 
     // ==========================================
+    // SUBSCRIPTION ORDERS LOOKUP FOR PROVISIONING
+    // ==========================================
+
+    @GetMapping("/subscription-orders/lookup")
+    public ResponseEntity<java.util.List<com.backend.dto.SubscriptionOrderLookupDTO>> lookupSubscriptionOrders(
+            @RequestParam(required = false) String query) {
+        return ResponseEntity.ok(subscriptionService.lookupOrdersForProvisioning(query));
+    }
+
+    // ==========================================
     // APPOINTMENT COMMISSION RATE
     // ==========================================
 
@@ -284,6 +295,65 @@ public class SuperadminController {
         } catch (Exception e) {
             return ResponseEntity.badRequest().body(java.util.Map.of("message", e.getMessage()));
         }
+    }
+
+    // ==========================================
+    // DAILY SETTLEMENT MONITORING
+    // ==========================================
+
+    @GetMapping("/settlements")
+    public ResponseEntity<?> getSettlements(
+            @RequestParam(required = false) @org.springframework.format.annotation.DateTimeFormat(iso = org.springframework.format.annotation.DateTimeFormat.ISO.DATE) java.time.LocalDate startDate,
+            @RequestParam(required = false) @org.springframework.format.annotation.DateTimeFormat(iso = org.springframework.format.annotation.DateTimeFormat.ISO.DATE) java.time.LocalDate endDate,
+            @RequestParam(required = false) Long tenantId,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String orgType) {
+        return ResponseEntity.ok(dailySettlementService.getSuperAdminOverview(startDate, endDate, tenantId, status, orgType));
+    }
+
+    @GetMapping("/settlements/{tenantId}/{date}")
+    public ResponseEntity<?> getSettlementDetail(
+            @PathVariable Long tenantId,
+            @PathVariable @org.springframework.format.annotation.DateTimeFormat(iso = org.springframework.format.annotation.DateTimeFormat.ISO.DATE) java.time.LocalDate date) {
+        return ResponseEntity.ok(dailySettlementService.getDailySettlementDetail(tenantId, date));
+    }
+
+    // ==========================================
+    // CLIENT MANAGEMENT
+    // ==========================================
+
+    @GetMapping("/clients")
+    public ResponseEntity<java.util.List<com.backend.dto.SuperadminClientDTO>> getAllClients(
+            @RequestParam(required = false) String timeFilter) {
+        return ResponseEntity.ok(superadminService.getAllClients(timeFilter));
+    }
+
+    @GetMapping("/clients/kpis")
+    public ResponseEntity<com.backend.dto.SuperadminClientKPIDTO> getClientKPIs(
+            @RequestParam(required = false) String timeFilter) {
+        return ResponseEntity.ok(superadminService.getClientKPIs(timeFilter));
+    }
+
+    @GetMapping("/clients/{id}")
+    public ResponseEntity<com.backend.dto.SuperadminClientDTO> getClientDetails(@PathVariable Long id) {
+        return ResponseEntity.ok(superadminService.getClientDetails(id));
+    }
+
+    @GetMapping("/clients/{id}/activities")
+    public ResponseEntity<java.util.List<com.backend.dto.SuperadminClientActivityDTO>> getClientActivities(@PathVariable Long id) {
+        return ResponseEntity.ok(superadminService.getClientActivities(id));
+    }
+
+    @PutMapping("/clients/{id}/suspend")
+    public ResponseEntity<Void> suspendClient(@PathVariable Long id) {
+        superadminService.suspendClient(id);
+        return ResponseEntity.ok().build();
+    }
+
+    @PutMapping("/clients/{id}/reactivate")
+    public ResponseEntity<Void> reactivateClient(@PathVariable Long id) {
+        superadminService.reactivateClient(id);
+        return ResponseEntity.ok().build();
     }
 }
 
